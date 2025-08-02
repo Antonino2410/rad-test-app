@@ -5,7 +5,6 @@ import os
 import datetime
 import matplotlib.pyplot as plt
 
-# --- Logo e titolo
 st.set_page_config(page_title="RAD-TEST", page_icon="🧪")
 
 st.markdown(
@@ -18,18 +17,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- Configurazione colonne (modificabili)
 COL_ITEM_NUMBER = "Item Number"
 COL_QTA_RICHIESTA = "Quantità richiesta"
 COL_LOCATION = "Location"
 COL_QUANTITA = "Quantità"
 
-# --- File storage
 RICHIESTE_FILE = "storico_richieste.csv"
 STOCK_MANO_FILE = "stock_in_mano.pkl"
 STOCK_RISERVA_FILE = "stock_in_riserva.pkl"
 
-# --- Caricamento dati
 def carica_file_pickle(file_path):
     if os.path.exists(file_path):
         with open(file_path, 'rb') as f:
@@ -53,13 +49,10 @@ richiesta = carica_csv(RICHIESTE_FILE)
 stock_in_mano = carica_file_pickle(STOCK_MANO_FILE)
 stock_in_riserva = carica_file_pickle(STOCK_RISERVA_FILE)
 
-# --- Sidebar menu
 page = st.sidebar.radio("Menu", ["Carica Stock In Mano", "Carica Stock Riserva", "Analisi Richieste & Suggerimenti"])
 
-# --- Soglia alert dinamica
 soglia = st.sidebar.number_input("Imposta soglia alert stock in mano", min_value=1, max_value=1000, value=20)
 
-# --- Pagina 1: Carica Stock In Mano
 if page == "Carica Stock In Mano":
     st.title("📥 Carica Stock Magazzino In Mano")
     uploaded_file = st.file_uploader("Carica file Excel stock in mano", type=["xlsx", "xls"])
@@ -76,7 +69,6 @@ if page == "Carica Stock In Mano":
         else:
             st.error(f"Il file deve contenere almeno le colonne '{COL_ITEM_NUMBER}' e '{COL_QUANTITA}'.")
 
-# --- Pagina 2: Carica Stock Riserva
 elif page == "Carica Stock Riserva":
     st.title("📥 Carica Stock Magazzino Riserva")
     uploaded_file = st.file_uploader("Carica file Excel stock in riserva", type=["xlsx", "xls"])
@@ -93,7 +85,6 @@ elif page == "Carica Stock Riserva":
         else:
             st.error(f"Il file deve contenere almeno le colonne '{COL_ITEM_NUMBER}' e '{COL_QUANTITA}'.")
 
-# --- Pagina 3: Analisi richieste & suggerimenti
 else:
     st.title("📊 Analisi Richieste & Suggerimenti")
 
@@ -111,20 +102,17 @@ else:
     if richiesta.empty:
         st.info("Nessun dato richieste disponibile. Carica un file per visualizzare analisi.")
     else:
-        # Analisi item più richiesti (ultimo mese)
         st.subheader("Item più richiesti (ultimo mese)")
         un_mese_fa = pd.Timestamp.now() - pd.Timedelta(days=30)
         recenti = richiesta[richiesta["Timestamp"] >= un_mese_fa]
         richieste_aggregate = recenti.groupby(COL_ITEM_NUMBER)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
         st.write(richieste_aggregate.head(10))
         
-        # Grafico torta
         fig, ax = plt.subplots()
         richieste_aggregate.head(10).plot.pie(ax=ax, autopct='%1.1f%%', startangle=90)
         ax.set_ylabel('')
         st.pyplot(fig)
         
-        # Alert soglia stock in mano
         st.subheader("⚠️ Alert stock basso")
         alert_emessi = False
         for item, qta_richiesta in richieste_aggregate.items():
@@ -136,7 +124,6 @@ else:
         if not alert_emessi:
             st.success("Nessun alert: tutti gli stock sono sopra la soglia.")
 
-# --- Sidebar info veloci
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📌 Consulta Stock")
 
@@ -147,8 +134,3 @@ def mostra_stock(stock_dict, titolo):
     item_scelto = st.sidebar.selectbox(f"Seleziona item ({titolo})", list(stock_dict.keys()))
     if item_scelto:
         val = stock_dict[item_scelto]
-        loc = val.get("location", "Non specificata")
-        st.sidebar.info(f"Quantità: {val.get('quantità', 0)}\nPosizione: {loc}")
-
-mostra_stock(stock_in_mano, "In Mano")
-mostra_stock(stock_in_riserva, "In Riserva")
