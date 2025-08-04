@@ -2,27 +2,26 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-# Configurazione pagina
+# Logo e titolo
 st.set_page_config(page_title="RAD-TEST", page_icon=":lente:", layout="wide")
-# Logo testuale
-st.markdown("# :razzo: RAD-TEST")
-st.title(":pacco: Gestione Magazzino e Analisi")
+st.image("rad_test_logo.png", width=200)  # Devi mettere un logo "rad_test_logo.png" nella cartella
+st.title(":pacco: RAD-TEST — Gestione Magazzino e Analisi")
 # Variabili globali
 soglia_alert = 20  # Soglia per avviso stock basso
 # Session state per salvare lo storico
 if "stock_in_mano" not in st.session_state:
-    st.session_state.stock_in_mano = pd.DataFrame(columns=["Item Code", "Quantità", "Location"])
+    st.session_state.stock_in_mano = pd.DataFrame(columns=["Item Number", "Quantità", "Location"])
 if "stock_riserva" not in st.session_state:
-    st.session_state.stock_riserva = pd.DataFrame(columns=["Item Code", "Quantità", "Location"])
+    st.session_state.stock_riserva = pd.DataFrame(columns=["Item Number", "Quantità", "Location"])
 if "richieste" not in st.session_state:
-    st.session_state.richieste = pd.DataFrame(columns=["Item Code", "Requested_quantity", "Timestamp", "Order Number"])
+    st.session_state.richieste = pd.DataFrame(columns=["Item Number", "Quantità richiesta", "Timestamp"])
 # Sidebar menu
 pagina = st.sidebar.selectbox(":portablocco: Menu", [
     "Carica Stock In Mano",
     "Carica Stock Riserva",
     "Analisi Richieste & Suggerimenti",
-    "Consulta Stock",
-    "Controllo Ordini"
+    "Consulta Stock In Mano",
+    "Consulta Stock Riserva"
 ])
 # Funzione per caricare file
 def carica_file_stock(nome):
@@ -52,57 +51,52 @@ elif pagina == "Analisi Richieste & Suggerimenti":
     uploaded_file = st.file_uploader("Carica il file delle Richieste (Excel)", type=["xlsx", "xls"])
     if uploaded_file:
         df = pd.read_excel(uploaded_file)
+        # :fuoco: CORREZIONE: convertire Timestamp in datetime
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors='coerce')
         st.session_state.richieste = pd.concat([st.session_state.richieste, df], ignore_index=True)
         st.success("Richieste caricate con successo!")
         st.write(st.session_state.richieste)
+        # Analisi ultimi 30 giorni
         un_mese_fa = datetime.now() - timedelta(days=30)
         recenti = st.session_state.richieste[st.session_state.richieste["Timestamp"] >= un_mese_fa]
         if not recenti.empty:
             st.subheader(":grafico_con_tendenza_in_aumento: Item più richiesti negli ultimi 30 giorni")
-            top_items = recenti.groupby("Item Code")["Requested_quantity"].sum().sort_values(ascending=False)
+            top_items = recenti.groupby("Item Number")["Quantità richiesta"].sum().sort_values(ascending=False)
             st.write(top_items)
+            # Grafico a torta
             fig, ax = plt.subplots()
             top_items.plot.pie(ax=ax, autopct='%1.1f%%', startangle=90)
             ax.set_ylabel("")
             st.pyplot(fig)
+            # Suggerimenti
             st.subheader(":lampadina: Suggerimento:")
-            st.info("Considera di tenere sempre disponibili gli item in cima alla lista.")
-# Pagina 4 — Consulta Stock
-elif pagina == "Consulta Stock":
-    st.header(":lente: Consulta Disponibilità Stock Totale")
-    ricerca = st.text_input(":lente: Cerca Item Code")
-    if ricerca:
-        st.subheader(f":pacco: Stock per Item: {ricerca}")
-        stock_mano = st.session_state.stock_in_mano[st.session_state.stock_in_mano["Item Code"] == ricerca]
-        stock_riserva = st.session_state.stock_riserva[st.session_state.stock_riserva["Item Code"] == ricerca]
-        totale = pd.concat([stock_mano, stock_riserva])
-        st.write(totale)
-# Pagina 5 — Controllo Ordini
-elif pagina == "Controllo Ordini":
-    st.header(":portablocco: Controllo Evadibilità Ordini")
-    uploaded_file = st.file_uploader("Carica file ordini (Excel)", type=["xlsx", "xls"])
-    if uploaded_file:
-        ordini = pd.read_excel(uploaded_file)
-        ordini["Order Number"] = ordini["Order Number"].astype(str)
-        st.write(":pacco: Ordini da controllare:", ordini)
-        stock = st.session_state.stock_in_mano.groupby("Item Code")["Quantità"].sum()
-        for _, riga in ordini.iterrows():
-            item = riga["Item Code"]
-            richiesta = riga["Requested_quantity"]
-            ordine = riga["Order Number"]
-            disponibilita = stock.get(item, 0)
-            if disponibilita >= richiesta:
-                st.success(f":segno_spunta_bianco: Ordine {ordine} — Item {item}: DISPONIBILE ({disponibilita} disponibili)")
+            st.info(f"Considera di tenere sempre disponibili gli item in cima alla lista.")
+# Pagina 4 — Consulta Stock In Mano
+elif pagina == "Consulta Stock In Mano":
+    st.header(":lente: Consulta Stock In Mano")
+    if st.session_state.stock_in_mano.empty:
+        st.warning(":avviso: Nessun stock in mano caricato.")
+    else:
+        item_selezionato = st.selectbox("Seleziona un Item Number", st.session_state.stock_in_mano["Item Number"].unique())
+        filtro = st.session_state.stock_in_mano[st.session_state.stock_in_mano["Item Number"] == item_selezionato]
+        st.write(filtro)
+        # Alert se sotto soglia
+        qty_totale = filtro["Quantità"].sum()
+        if qty_totale < soglia_alert:
+            st.error(f":avviso: ATTENZIONE: Quantità in stock in mano ({qty_totale}) sotto la soglia di {soglia_alert} pezzi.")
+            # Cerca nella riserva
+            riserva = st.session_state.stock_riserva[st.session_state.stock_riserva["Item Number"] == item_selezionato]
+            if not riserva.empty:
+                st.info(f":freccia_destra: Puoi richiamarlo dalla riserva ({riserva['Quantità'].sum()} pezzi disponibili).")
+                st.write(riserva)
             else:
-                st.error(f":x: Ordine {ordine} — Item {item}: NON disponibile ({disponibilita} in stock).")
-                # cerca nella riserva
-                riserva = st.session_state.stock_riserva[
-                    (st.session_state.stock_riserva["Item Code"] == item) &
-                    (st.session_state.stock_riserva["Location"].str.contains("inventory", case=False, na=False))
-                ]
-                if not riserva.empty:
-                    st.info(f":ripeti: Disponibile in magazzino di riserva:")
-                    st.write(riserva[["Location", "Quantità"]])
-                else:
-                    st.warning(":avviso: Nessuna riserva disponibile per questo item.")
+                st.warning(":avviso: Nessuna riserva disponibile per questo item.")
+# Pagina 5 — Consulta Stock Riserva
+elif pagina == "Consulta Stock Riserva":
+    st.header(":lente: Consulta Stock Riserva")
+    if st.session_state.stock_riserva.empty:
+        st.warning(":avviso: Nessun stock di riserva caricato.")
+    else:
+        item_selezionato = st.selectbox("Seleziona un Item Number", st.session_state.stock_riserva["Item Number"].unique())
+        filtro = st.session_state.stock_riserva[st.session_state.stock_riserva["Item Number"] == item_selezionato]
+        st.write(filtro)
