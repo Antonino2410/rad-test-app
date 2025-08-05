@@ -29,10 +29,110 @@ STOCK_MANO_FILE = "stock_in_mano.pkl"
 STOCK_RISERVA_FILE = "stock_in_riserva.pkl"
 
 # ---------------------------
-# Helper I/O e normalizzazione
+# Funzioni I/O e normalizzazione
 # ---------------------------
+def norma_item_code(x):
+    if pd.isna(x):
+        return ""
+    return str(x).strip().upper()
+
+def _normalize_res_entry(e):
+    """
+    Normalizza una singola entry di riserva in dict {'quantità': int, 'location': str}
+    """
+    if isinstance(e, dict):
+        # prova vari nomi possibile per quantità / location
+        q = e.get("quantità", e.get("Quantità", e.get("Quantita", 0)))
+        loc = e.get("location", e.get("Location", e.get("location_name", "")))
+        try:
+            q = int(q)
+        except Exception:
+            q = 0
+        loc = "" if pd.isna(loc) else str(loc).strip()
+        return {"quantità": q, "location": loc}
+    # se e è numero/stringa interpretabile come quantità (senza location)
+    if isinstance(e, (int, float, str)):
+        try:
+            q = int(e)
+        except Exception:
+            q = 0
+        return {"quantità": q, "location": ""}
+    # fallback
+    return {"quantità": 0, "location": ""}
+
+def normalize_stock_in_riserva_dict(orig):
+    """
+    Ricostruisce stock_in_riserva in formato:
+    {ITEM_CODE_NORMALIZED: [ {"quantità": int, "location": str}, ... ], ...}
+    """
+    new = {}
+    if not isinstance(orig, dict):
+        return {}
+    for k, v in orig.items():
+        nk = norma_item_code(k)
+        items = []
+        if isinstance(v, list):
+            for e in v:
+                items.append(_normalize_res_entry(e))
+        elif isinstance(v, dict):
+            items.append(_normalize_res_entry(v))
+        elif isinstance(v, (int, float, str)):
+            items.append(_normalize_res_entry(v))
+        # assicurati che tutte le location siano stringhe pulite
+        new[nk] = items
+    return new
+
+def normalize_stock_in_mano_dict(orig):
+    """
+    Normalizza stock_in_mano in formato:
+    {ITEM_CODE_NORMALIZED: {"quantità": int, "location": str}}
+    Se orig had lists, somma eventuali quantità e prende prima location non vuota.
+    """
+    new = {}
+    if not isinstance(orig, dict):
+        return {}
+    for k, v in orig.items():
+        nk = norma_item_code(k)
+        if isinstance(v, dict):
+            q = v.get("quantità", v.get("Quantità", v.get("Quantita",0)))
+            loc = v.get("location", v.get("Location",""))
+            try:
+                q = int(q)
+            except Exception:
+                q = 0
+            loc = "" if pd.isna(loc) else str(loc).strip()
+            new[nk] = {"quantità": q, "location": loc}
+        elif isinstance(v, (list, tuple)):
+            total = 0
+            loc = ""
+            for e in v:
+                if isinstance(e, dict):
+                    q = e.get("quantità", e.get("Quantità", e.get("Quantita",0)))
+                    try:
+                        total += int(q)
+                    except Exception:
+                        pass
+                    if not loc:
+                        loc = e.get("location", e.get("Location",""))
+                elif isinstance(e, (int, float, str)):
+                    try:
+                        total += int(e)
+                    except Exception:
+                        pass
+            loc = "" if pd.isna(loc) else str(loc).strip()
+            new[nk] = {"quantità": total, "location": loc}
+        elif isinstance(v, (int, float, str)):
+            try:
+                q = int(v)
+            except Exception:
+                q = 0
+            new[nk] = {"quantità": q, "location": ""}
+        else:
+            new[nk] = {"quantità": 0, "location": ""}
+    return new
+
 def carica_pickle_safe(path):
-    """Carica pickle (o {} se non esiste/errore). Normalizza valori in lista per riserva."""
+    """Carica pickle e normalizza le strutture interne."""
     if not os.path.exists(path):
         return {}
     try:
@@ -40,11 +140,7 @@ def carica_pickle_safe(path):
             data = pickle.load(f)
     except Exception:
         return {}
-    if isinstance(data, dict):
-        for k, v in list(data.items()):
-            if isinstance(v, list):
-                continue
-            data[k] = [v]
+    # Non normalizziamo qui: facciamo dopo in modo esplicito
     return data if isinstance(data, dict) else {}
 
 def salva_pickle(path, data):
@@ -63,77 +159,15 @@ def salva_csv(path, df):
     df.to_csv(path, index=False)
 
 # ---------------------------
-# Normalizzazione Item Code
-# ---------------------------
-def norma_item_code(x):
-    if pd.isna(x):
-        return ""
-    return str(x).strip().upper()
-
-def normalizza_stock_mano_dict(orig):
-    new = {}
-    for k, v in orig.items():
-        nk = norma_item_code(k)
-        new[nk] = v
-    return new
-
-def normalizza_stock_riserva_dict(orig):
-    new = {}
-    for k, v in orig.items():
-        nk = norma_item_code(k)
-        new[nk] = v
-    return new
-
-# ---------------------------
-# Funzione robusta estrazione quantità
-# ---------------------------
-def estrai_quantita_from_stock_mano(stock_in_mano, item):
-    """Restituisce quantità disponibile per item gestendo formati diversi."""
-    val = stock_in_mano.get(item, None)
-    if isinstance(val, dict):
-        try:
-            return int(val.get("quantità", 0))
-        except Exception:
-            return 0
-    if isinstance(val, (list, tuple)):
-        total = 0
-        for e in val:
-            if isinstance(e, dict):
-                try:
-                    total += int(e.get("quantità", 0))
-                except Exception:
-                    continue
-            elif isinstance(e, (int, float, str)):
-                try:
-                    total += int(e)
-                except Exception:
-                    continue
-        return total
-    if isinstance(val, (int, float)):
-        return int(val)
-    return 0
-
-def estrai_location_from_stock_mano(stock_in_mano, item):
-    """Restituisce una location rappresentativa per item nello stock in mano (se disponibile)."""
-    val = stock_in_mano.get(item, None)
-    if isinstance(val, dict):
-        return val.get("location", "")
-    if isinstance(val, (list, tuple)) and len(val) > 0:
-        first = val[0]
-        if isinstance(first, dict):
-            return first.get("location", "")
-    return ""
-
-# ---------------------------
-# Caricamento persistente all'avvio (poi normalizziamo)
+# Caricamento persistente all'avvio e normalizzazione
 # ---------------------------
 richiesta = carica_csv(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TIMESTAMP_COL])
-stock_in_mano = carica_pickle_safe(STOCK_MANO_FILE)
-stock_in_riserva = carica_pickle_safe(STOCK_RISERVA_FILE)
+_raw_stock_in_mano = carica_pickle_safe(STOCK_MANO_FILE)
+_raw_stock_in_riserva = carica_pickle_safe(STOCK_RISERVA_FILE)
 
-# Normalizza chiavi esistenti
-stock_in_mano = normalizza_stock_mano_dict(stock_in_mano)
-stock_in_riserva = normalizza_stock_riserva_dict(stock_in_riserva)
+# normalizza strutture
+stock_in_mano = normalize_stock_in_mano_dict(_raw_stock_in_mano)
+stock_in_riserva = normalize_stock_in_riserva_dict(_raw_stock_in_riserva)
 
 # sicurezza: se non dict, resetta
 if not isinstance(stock_in_mano, dict):
@@ -155,7 +189,7 @@ soglia = st.sidebar.number_input("Soglia alert stock in mano", min_value=1, max_
 show_keys = st.sidebar.checkbox("Mostra prime chiavi stock (debug)", value=False)
 
 # ---------------------------
-# Pagina: carica stock in mano
+# Pagina: Carica Stock In Mano
 # ---------------------------
 if page == "Carica Stock In Mano":
     st.title("📥 Carica Stock Magazzino In Mano")
@@ -185,6 +219,7 @@ if page == "Carica Stock In Mano":
                 except Exception:
                     qta = 0
                 loc = row.get(COL_LOCATION, "")
+                loc = "" if pd.isna(loc) else str(loc).strip()
                 stock_in_mano[item] = {"quantità": qta, "location": loc}
             salva_pickle(STOCK_MANO_FILE, stock_in_mano)
             st.success("✅ Stock in mano aggiornato e salvato.")
@@ -192,7 +227,7 @@ if page == "Carica Stock In Mano":
             st.error("Il file deve contenere colonne per 'Item Code' e 'Quantità' (o equivalenti).")
 
 # ---------------------------
-# Pagina: carica stock riserva
+# Pagina: Carica Stock Riserva
 # ---------------------------
 elif page == "Carica Stock Riserva":
     st.title("📥 Carica Stock Magazzino Riserva")
@@ -222,16 +257,19 @@ elif page == "Carica Stock Riserva":
                 except Exception:
                     qta = 0
                 loc = row.get(COL_LOCATION, "")
+                loc = "" if pd.isna(loc) else str(loc).strip()
                 if not isinstance(stock_in_riserva.get(item), list):
                     stock_in_riserva[item] = []
                 stock_in_riserva[item].append({"quantità": qta, "location": loc})
+            # salva la struttura normalizzata
+            stock_in_riserva = normalize_stock_in_riserva_dict(stock_in_riserva)
             salva_pickle(STOCK_RISERVA_FILE, stock_in_riserva)
             st.success("✅ Stock riserva aggiornato e salvato.")
         else:
             st.error("Il file deve contenere colonne per 'Item Code', 'Quantità' e 'Location' (o equivalenti).")
 
 # ---------------------------
-# Pagina: Analisi richieste & suggerimenti
+# Pagina: Analisi Richieste & Suggerimenti
 # ---------------------------
 elif page == "Analisi Richieste & Suggerimenti":
     st.title("📊 Analisi Richieste & Suggerimenti")
@@ -292,11 +330,21 @@ elif page == "Analisi Richieste & Suggerimenti":
                 rows = []
                 for _, r in filtro.iterrows():
                     item = r[COL_ITEM_CODE]
+                    # item è già normalizzato quando abbiamo aggiunto a storico
                     try:
                         req_qta = int(r[COL_QTA_RICHIESTA])
                     except Exception:
                         req_qta = 0
-                    mano_qta = estrai_quantita_from_stock_mano(stock_in_mano, item)
+
+                    mano_qta = stock_in_mano.get(item, {}).get("quantità", 0)
+                    # fallback robusto
+                    if mano_qta is None:
+                        mano_qta = 0
+                    try:
+                        mano_qta = int(mano_qta)
+                    except Exception:
+                        mano_qta = 0
+
                     status = "✅ Disponibile"
                     reserve_locations_str = ""
 
@@ -305,7 +353,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                         locs = []
                         total_reserve = 0
                         for rec in stock_in_riserva.get(item, []):
-                            loc_name = str(rec.get("location", ""))
+                            loc_name = str(rec.get("location", "")).strip()
                             if "inventory" in loc_name.lower():
                                 try:
                                     q = int(rec.get("quantità", 0))
@@ -330,6 +378,10 @@ elif page == "Analisi Richieste & Suggerimenti":
                         "Reserve Locations (INVENTORY)": reserve_locations_str,
                         "Status": status
                     })
+
+                    # Debug: mostra i record di riserva trovati per questo item (se checkbox attiva)
+                    if show_keys:
+                        st.write("DEBUG - riserva raw for", item, ":", stock_in_riserva.get(item, []))
 
                 result_df = pd.DataFrame(rows)
                 st.dataframe(result_df)
@@ -358,8 +410,8 @@ if query:
     q = norma_item_code(query)
     found = False
     if q in stock_in_mano:
-        qta_mano = estrai_quantita_from_stock_mano(stock_in_mano, q)
-        loc = estrai_location_from_stock_mano(stock_in_mano, q)
+        qta_mano = stock_in_mano[q].get("quantità", 0)
+        loc = stock_in_mano[q].get("location", "")
         st.sidebar.success(f"[In Mano] {qta_mano} @ {loc}")
         found = True
     if q in stock_in_riserva:
