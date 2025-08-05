@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import pickle
 import os
-import datetime
 import matplotlib.pyplot as plt
 st.set_page_config(page_title="RAD-TEST", page_icon=":provetta:")
 st.markdown("""
@@ -88,12 +87,12 @@ elif page == "Analisi Richieste & Suggerimenti":
     if uploaded_file:
         df = pd.read_excel(uploaded_file)
         df["Timestamp"] = pd.Timestamp.now()
-        if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
+        if all(col in df.columns for col in [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER]):
             richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, "Timestamp"]]], ignore_index=True)
             salva_csv(RICHIESTE_FILE, richiesta)
             st.success("Storico richieste aggiornato!")
         else:
-            st.error(f"Il file deve contenere almeno le colonne '{COL_ITEM_CODE}' e '{COL_QTA_RICHIESTA}'.")
+            st.error(f"Il file deve contenere almeno le colonne '{COL_ITEM_CODE}', '{COL_QTA_RICHIESTA}' e '{COL_ORDER}'.")
     if richiesta.empty:
         st.info("Nessun dato richieste disponibile.")
     else:
@@ -112,32 +111,32 @@ elif page == "Analisi Richieste & Suggerimenti":
             loc = stock_in_mano.get(item, {}).get("location", "non definita")
             if qta_in_mano < soglia:
                 st.warning(f"'{item}' è sotto soglia! In magazzino: {qta_in_mano}. Richiamare da: {loc}")
-        # 🔎 Verifica per Order Number
         st.markdown("## 🔍 Verifica disponibilità per ordine specifico")
-        if "Order Number" in richiesta.columns:
-            ordine_unico = st.selectbox("Seleziona un Order Number", richiesta["Order Number"].dropna().unique())
-            if st.button("Verifica disponibilità per ordine"):
-                filtro_ordine = richiesta[richiesta["Order Number"] == ordine_unico]
-                for _, riga in filtro_ordine.iterrows():
-                    item = riga[COL_ITEM_CODE]
-                    richiesta_qta = riga[COL_QTA_RICHIESTA]
-                    qta_stock = stock_in_mano.get(item, {}).get("quantità", 0)
-                    loc_stock = stock_in_mano.get(item, {}).get("location", "non definita")
-                    if qta_stock >= richiesta_qta:
-                        st.success(f":segno_spunta_bianco: '{item}' disponibile - Richiesta: {richiesta_qta}, In stock: {qta_stock} (Location: {loc_stock})")
+        ordine_unico = st.selectbox("Seleziona un Order Number", richiesta[COL_ORDER].dropna().unique())
+        if st.button("Verifica disponibilità per ordine"):
+            filtro_ordine = richiesta[richiesta[COL_ORDER] == ordine_unico]
+            for _, riga in filtro_ordine.iterrows():
+                item = riga[COL_ITEM_CODE]
+                richiesta_qta = riga[COL_QTA_RICHIESTA]
+                qta_stock = stock_in_mano.get(item, {}).get("quantità", 0)
+                loc_stock = stock_in_mano.get(item, {}).get("location", "non definita")
+                if qta_stock >= richiesta_qta:
+                    st.success(f":segno_spunta_bianco: '{item}' disponibile - Richiesta: {richiesta_qta}, In stock: {qta_stock} (Location: {loc_stock})")
+                else:
+                    mancante = richiesta_qta - qta_stock
+                    suggerimenti = []
+                    for chiave_item, info in stock_in_riserva.items():
+                        if chiave_item == item and "inventory" in info.get("location", "").lower():
+                            riserva_qta = info.get("quantità", 0)
+                            if riserva_qta > 0:
+                                qta_da_prendere = min(mancante, riserva_qta)
+                                suggerimenti.append(f"- {qta_da_prendere} da {info['location']}")
+                    if suggerimenti:
+                        st.warning(f":avviso: '{item}' mancano {mancante} pezzi.
+Suggerimenti:
+" + "\n".join(suggerimenti))
                     else:
-                        mancante = richiesta_qta - qta_stock
-                        suggerimenti = []
-                        for chiave_item, info in stock_in_riserva.items():
-                            if chiave_item == item and "inventory" in info.get("location", "").lower():
-                                riserva_qta = info.get("quantità", 0)
-                                if riserva_qta > 0:
-                                    qta_da_prendere = min(mancante, riserva_qta)
-                                    suggerimenti.append(f"- {qta_da_prendere} da {info['location']}")
-                        if suggerimenti:
-                            st.warning(f":avviso: '{item}' mancano {mancante} pezzi.\nSuggerimenti:\n" + "\n".join(suggerimenti))
-                        else:
-                            st.error(f":x: '{item}' non disponibile in stock né in magazzini con 'inventory'.")
+                        st.error(f":x: '{item}' non disponibile in stock né in magazzini con 'inventory'.")
 # --- Barra laterale: Ricerca Stock ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### :lente_a_destra: Ricerca Item")
