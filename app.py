@@ -1,4 +1,3 @@
-# app.py - RAD-TEST (versione corretta)
 import streamlit as st
 import pandas as pd
 import pickle
@@ -64,6 +63,28 @@ def salva_csv(path, df):
     df.to_csv(path, index=False)
 
 # ---------------------------
+# Normalizzazione Item Code
+# ---------------------------
+def norma_item_code(x):
+    if pd.isna(x):
+        return ""
+    return str(x).strip().upper()
+
+def normalizza_stock_mano_dict(orig):
+    new = {}
+    for k, v in orig.items():
+        nk = norma_item_code(k)
+        new[nk] = v
+    return new
+
+def normalizza_stock_riserva_dict(orig):
+    new = {}
+    for k, v in orig.items():
+        nk = norma_item_code(k)
+        new[nk] = v
+    return new
+
+# ---------------------------
 # Funzione robusta estrazione quantità
 # ---------------------------
 def estrai_quantita_from_stock_mano(stock_in_mano, item):
@@ -104,12 +125,17 @@ def estrai_location_from_stock_mano(stock_in_mano, item):
     return ""
 
 # ---------------------------
-# Caricamento persistente all'avvio
+# Caricamento persistente all'avvio (poi normalizziamo)
 # ---------------------------
 richiesta = carica_csv(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TIMESTAMP_COL])
 stock_in_mano = carica_pickle_safe(STOCK_MANO_FILE)
 stock_in_riserva = carica_pickle_safe(STOCK_RISERVA_FILE)
 
+# Normalizza chiavi esistenti
+stock_in_mano = normalizza_stock_mano_dict(stock_in_mano)
+stock_in_riserva = normalizza_stock_riserva_dict(stock_in_riserva)
+
+# sicurezza: se non dict, resetta
 if not isinstance(stock_in_mano, dict):
     stock_in_mano = {}
 if not isinstance(stock_in_riserva, dict):
@@ -124,6 +150,9 @@ page = st.sidebar.radio("Menu", [
     "Analisi Richieste & Suggerimenti"
 ])
 soglia = st.sidebar.number_input("Soglia alert stock in mano", min_value=1, max_value=10000, value=20)
+
+# Debug toggle
+show_keys = st.sidebar.checkbox("Mostra prime chiavi stock (debug)", value=False)
 
 # ---------------------------
 # Pagina: carica stock in mano
@@ -149,7 +178,8 @@ if page == "Carica Stock In Mano":
 
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns:
             for _, row in df.iterrows():
-                item = row[COL_ITEM_CODE]
+                raw = row[COL_ITEM_CODE]
+                item = norma_item_code(raw)
                 try:
                     qta = int(row.get(COL_QUANTITA, 0))
                 except Exception:
@@ -185,7 +215,8 @@ elif page == "Carica Stock Riserva":
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns and COL_LOCATION in df.columns:
             grouped = df.groupby([COL_ITEM_CODE, COL_LOCATION])[COL_QUANTITA].sum().reset_index()
             for _, row in grouped.iterrows():
-                item = row[COL_ITEM_CODE]
+                raw = row[COL_ITEM_CODE]
+                item = norma_item_code(raw)
                 try:
                     qta = int(row.get(COL_QUANTITA, 0))
                 except Exception:
@@ -221,6 +252,10 @@ elif page == "Analisi Richieste & Suggerimenti":
                 rename_map[c] = COL_ORDER
         if rename_map:
             df.rename(columns=rename_map, inplace=True)
+
+        # normalizza item code nella richiesta
+        if COL_ITEM_CODE in df.columns:
+            df[COL_ITEM_CODE] = df[COL_ITEM_CODE].apply(norma_item_code)
 
         df[TIMESTAMP_COL] = pd.Timestamp.now()
 
@@ -319,9 +354,8 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔎 Ricerca Item rapido")
 
 query = st.sidebar.text_input("Cerca Item Code")
-
 if query:
-    q = query.strip()
+    q = norma_item_code(query)
     found = False
     if q in stock_in_mano:
         qta_mano = estrai_quantita_from_stock_mano(stock_in_mano, q)
@@ -337,3 +371,9 @@ if query:
         found = True
     if not found:
         st.sidebar.warning("Item non trovato in nessuno stock.")
+
+# debug output keys
+if show_keys:
+    st.sidebar.markdown("**Esempio chiavi caricate:**")
+    st.sidebar.write("Stock in mano (prime 50):", list(stock_in_mano.keys())[:50])
+    st.sidebar.write("Stock in riserva (prime 50):", list(stock_in_riserva.keys())[:50])
