@@ -1,3 +1,4 @@
+# app.py - RAD-TEST (versione corretta)
 import streamlit as st
 import pandas as pd
 import pickle
@@ -32,7 +33,7 @@ STOCK_RISERVA_FILE = "stock_in_riserva.pkl"
 # Helper I/O e normalizzazione
 # ---------------------------
 def carica_pickle_safe(path):
-    """Carica pickle (o {} se non esiste/errore). Normalizza stock_in_riserva come dict[item] -> list[dict]."""
+    """Carica pickle (o {} se non esiste/errore). Normalizza valori in lista per riserva."""
     if not os.path.exists(path):
         return {}
     try:
@@ -40,12 +41,10 @@ def carica_pickle_safe(path):
             data = pickle.load(f)
     except Exception:
         return {}
-    # Normalizza: se è dict, assicurati che i valori siano liste quando si tratta riserva
     if isinstance(data, dict):
         for k, v in list(data.items()):
             if isinstance(v, list):
                 continue
-            # converti singolo dict/numero in lista
             data[k] = [v]
     return data if isinstance(data, dict) else {}
 
@@ -68,18 +67,13 @@ def salva_csv(path, df):
 # Funzione robusta estrazione quantità
 # ---------------------------
 def estrai_quantita_from_stock_mano(stock_in_mano, item):
-    """
-    Restituisce la quantità disponibile in stock_in_mano per 'item'.
-    Gestisce diversi formati per backward-compatibility.
-    """
+    """Restituisce quantità disponibile per item gestendo formati diversi."""
     val = stock_in_mano.get(item, None)
-    # dict con chiave 'quantità'
     if isinstance(val, dict):
         try:
             return int(val.get("quantità", 0))
         except Exception:
             return 0
-    # lista di dict o valori
     if isinstance(val, (list, tuple)):
         total = 0
         for e in val:
@@ -94,16 +88,12 @@ def estrai_quantita_from_stock_mano(stock_in_mano, item):
                 except Exception:
                     continue
         return total
-    # numero semplice
     if isinstance(val, (int, float)):
         return int(val)
-    # fallback 0
     return 0
 
 def estrai_location_from_stock_mano(stock_in_mano, item):
-    """
-    Cerca una location rappresentativa nello stock in mano per mostrare all'utente.
-    """
+    """Restituisce una location rappresentativa per item nello stock in mano (se disponibile)."""
     val = stock_in_mano.get(item, None)
     if isinstance(val, dict):
         return val.get("location", "")
@@ -117,10 +107,9 @@ def estrai_location_from_stock_mano(stock_in_mano, item):
 # Caricamento persistente all'avvio
 # ---------------------------
 richiesta = carica_csv(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TIMESTAMP_COL])
-stock_in_mano = carica_pickle_safe(STOCK_MANO_FILE)       # dict[item] -> {"quantità": x, "location": "A"}
-stock_in_riserva = carica_pickle_safe(STOCK_RISERVA_FILE) # dict[item] -> [ {"quantità": x, "location": "X"}, ... ]
+stock_in_mano = carica_pickle_safe(STOCK_MANO_FILE)
+stock_in_riserva = carica_pickle_safe(STOCK_RISERVA_FILE)
 
-# sicurezza: se non dict, resetta
 if not isinstance(stock_in_mano, dict):
     stock_in_mano = {}
 if not isinstance(stock_in_riserva, dict):
@@ -145,24 +134,19 @@ if page == "Carica Stock In Mano":
     if up:
         df = pd.read_excel(up)
         st.write("Colonne trovate:", df.columns.tolist())
-        # cerca mapping case-insensitive: prova a mappare colonne comuni
-        df_cols = {c.strip(): c for c in df.columns}
-        # controlla esattezza o prova a trovare alternative
-        if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns:
-            pass
-        else:
-            # prova a rinominare 'Item Number' -> Item Code, 'Quantità' varianti -> Quantità
-            rename_map = {}
-            for c in df.columns:
-                cl = c.strip().lower()
-                if cl in ["item number", "item_number", "itemcode", "item code", "item"]:
-                    rename_map[c] = COL_ITEM_CODE
-                if cl in ["quantità", "quantita", "quantity", "qty"]:
-                    rename_map[c] = COL_QUANTITA
-                if cl in ["location", "loc"]:
-                    rename_map[c] = COL_LOCATION
-            if rename_map:
-                df.rename(columns=rename_map, inplace=True)
+        # prova a rinominare colonne comuni (case-insensitive)
+        rename_map = {}
+        for c in df.columns:
+            cl = c.strip().lower()
+            if cl in ["item number", "item_number", "itemcode", "item code", "item"]:
+                rename_map[c] = COL_ITEM_CODE
+            if cl in ["quantità", "quantita", "quantity", "qty"]:
+                rename_map[c] = COL_QUANTITA
+            if cl in ["location", "loc"]:
+                rename_map[c] = COL_LOCATION
+        if rename_map:
+            df.rename(columns=rename_map, inplace=True)
+
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns:
             for _, row in df.iterrows():
                 item = row[COL_ITEM_CODE]
@@ -175,7 +159,7 @@ if page == "Carica Stock In Mano":
             salva_pickle(STOCK_MANO_FILE, stock_in_mano)
             st.success("✅ Stock in mano aggiornato e salvato.")
         else:
-            st.error(f"Il file deve contenere colonne per 'Item Code' e 'Quantità' (o equivalenti).")
+            st.error("Il file deve contenere colonne per 'Item Code' e 'Quantità' (o equivalenti).")
 
 # ---------------------------
 # Pagina: carica stock riserva
@@ -186,7 +170,6 @@ elif page == "Carica Stock Riserva":
     if up:
         df = pd.read_excel(up)
         st.write("Colonne trovate:", df.columns.tolist())
-        # tentativo di rinomina colonna come sopra
         rename_map = {}
         for c in df.columns:
             cl = c.strip().lower()
@@ -200,9 +183,7 @@ elif page == "Carica Stock Riserva":
             df.rename(columns=rename_map, inplace=True)
 
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns and COL_LOCATION in df.columns:
-            # raggruppa per item+location e somma quantità
             grouped = df.groupby([COL_ITEM_CODE, COL_LOCATION])[COL_QUANTITA].sum().reset_index()
-            # assicura che stock_in_riserva[item] sia lista
             for _, row in grouped.iterrows():
                 item = row[COL_ITEM_CODE]
                 try:
@@ -212,15 +193,16 @@ elif page == "Carica Stock Riserva":
                 loc = row.get(COL_LOCATION, "")
                 if not isinstance(stock_in_riserva.get(item), list):
                     stock_in_riserva[item] = []
-                # aggiungi la location (non unisci duplicate: grouped già somma)
                 stock_in_riserva[item].append({"quantità": qta, "location": loc})
             salva_pickle(STOCK_RISERVA_FILE, stock_in_riserva)
             st.success("✅ Stock riserva aggiornato e salvato.")
         else:
-            st.error(f"Il file deve contenere colonne per 'Item Code', 'Quantità' e 'Location' (o equivalenti).")
+            st.error("Il file deve contenere colonne per 'Item Code', 'Quantità' e 'Location' (o equivalenti).")
 
 # ---------------------------
-# Pagina: Analisi richieste & suggerimenti # --------------------------- elif page == "Analisi Richieste & Suggerimenti":
+# Pagina: Analisi richieste & suggerimenti
+# ---------------------------
+elif page == "Analisi Richieste & Suggerimenti":
     st.title("📊 Analisi Richieste & Suggerimenti")
 
     up = st.file_uploader("Carica file Excel richieste (Item Code, Requested_quantity, Order Number)", type=["xlsx", "xls"])
@@ -228,7 +210,6 @@ elif page == "Carica Stock Riserva":
         df = pd.read_excel(up)
         st.write("Colonne trovate:", df.columns.tolist())
 
-        # rinomina colonne comuni (fai match semplice)
         rename_map = {}
         for c in df.columns:
             cl = c.strip().lower()
@@ -241,26 +222,25 @@ elif page == "Carica Stock Riserva":
         if rename_map:
             df.rename(columns=rename_map, inplace=True)
 
-        # Forza timestamp
         df[TIMESTAMP_COL] = pd.Timestamp.now()
 
-        # Controllo colonne minime
         if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
             if COL_ORDER not in df.columns:
                 df[COL_ORDER] = pd.NA
-            # append nello storico
             richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TIMESTAMP_COL]]], ignore_index=True)
             salva_csv(RICHIESTE_FILE, richiesta)
             st.success("✅ Richieste aggiunte allo storico.")
         else:
             st.error(f"Il file richieste deve contenere almeno le colonne: '{COL_ITEM_CODE}' e '{COL_QTA_RICHIESTA}'.")
 
-    # Se abbiamo storico, mostra analisi e verifica ordine
     if not richiesta.empty:
         st.subheader("📈 Item più richiesti (ultimi 30 giorni)")
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
         recenti = richiesta[richiesta[TIMESTAMP_COL] >= cutoff]
-        agg = recenti.groupby(COL_ITEM_CODE)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
+        try:
+            agg = recenti.groupby(COL_ITEM_CODE)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
+        except Exception:
+            agg = pd.Series(dtype=float)
         if not agg.empty:
             st.bar_chart(agg.head(10))
         else:
@@ -289,7 +269,6 @@ elif page == "Carica Stock Riserva":
                         missing = req_qta - mano_qta
                         locs = []
                         total_reserve = 0
-                        # cerca tutte le location INVENTORY nello stock di riserva
                         for rec in stock_in_riserva.get(item, []):
                             loc_name = str(rec.get("location", ""))
                             if "inventory" in loc_name.lower():
@@ -318,10 +297,8 @@ elif page == "Carica Stock Riserva":
                     })
 
                 result_df = pd.DataFrame(rows)
-                # Mostra tabella
                 st.dataframe(result_df)
 
-                # Download Excel (dati puliti)
                 buf = BytesIO()
                 result_df.to_excel(buf, index=False)
                 buf.seek(0)
@@ -339,12 +316,14 @@ elif page == "Carica Stock Riserva":
 # Sidebar: ricerca rapida
 # ---------------------------
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔎 Ricerca Item rapido") query = st.sidebar.text_input("Cerca Item Code") if query:
+st.sidebar.markdown("### 🔎 Ricerca Item rapido")
+
+query = st.sidebar.text_input("Cerca Item Code")
+
+if query:
     q = query.strip()
     found = False
     if q in stock_in_mano:
-        v = stock_in_mano[q]
-        # estrai quantità robusta
         qta_mano = estrai_quantita_from_stock_mano(stock_in_mano, q)
         loc = estrai_location_from_stock_mano(stock_in_mano, q)
         st.sidebar.success(f"[In Mano] {qta_mano} @ {loc}")
