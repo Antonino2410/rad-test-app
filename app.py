@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 import pickle
 import os
-import datetime
+from io import BytesIO
 import matplotlib.pyplot as plt
+import datetime
 
-st.set_page_config(page_title="RAD-TEST", page_icon="🧪")
+# ---------------- Config ----------------
+st.set_page_config(page_title="RAD-TEST", page_icon="🧪", layout="wide")
 
 st.markdown("""
     <div style="display:flex; align-items:center; gap:15px;">
@@ -14,374 +16,507 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# --- Costanti ---
+# ---------------- Constants ----------------
 COL_ITEM_CODE = "Item Code"
 COL_QTA_RICHIESTA = "Requested_quantity"
 COL_LOCATION = "Location"
 COL_QUANTITA = "Quantità"
 COL_ORDER = "Order Number"
+TS_COL = "Timestamp"
 
 RICHIESTE_FILE = "storico_richieste.csv"
+STORICO_VERIFICHE_FILE = "storico_verifiche.csv"
 STOCK_MANO_FILE = "stock_in_mano.pkl"
 STOCK_RISERVA_FILE = "stock_in_riserva.pkl"
 
-# --- Funzioni ---
-def carica_file_pickle(file_path):
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'rb') as f:
-                return pickle.load(f)
-        except Exception:
-            return {}
-    return {}
+# ---------------- Helpers I/O ----------------
+def carica_pickle_safe(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return {}
 
-def salva_file_pickle(file_path, data):
-    with open(file_path, 'wb') as f:
+def salva_pickle(path, data):
+    with open(path, "wb") as f:
         pickle.dump(data, f)
 
-def carica_csv(file_path):
-    if os.path.exists(file_path):
-        df = pd.read_csv(file_path)
-        if "Timestamp" in df.columns:
-            df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors='coerce')
-        return df
-    else:
-        return pd.DataFrame(columns=[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, "Timestamp"])
-
-def salva_csv(file_path, df):
-    df.to_csv(file_path, index=False)
-
-def get_reserve_locations_for_item(stock_reserve, item_key):
-    """
-    Restituisce una lista di tuple (location, quantità) per l'item in stock_reserve
-    filtrando solo le location che contengono 'inventory' (case-insensitive).
-    Gestisce sia valori singoli dict che liste di dict.
-    """
-    result = []
-    val = stock_reserve.get(item_key)
-    if val is None:
-        return result
-
-    # Se è una lista di record
-    if isinstance(val, (list, tuple)):
-        for rec in val:
-            if not isinstance(rec, dict):
-                continue
-            loc = str(rec.get("location", "")).strip()
-            try:
-                q = int(rec.get("quantità", rec.get("Quantità", 0)))
-            except Exception:
-                q = 0
-            if "inventory" in loc.lower():
-                result.append((loc, q))
-        return result
-
-    # Se è un singolo dict
-    if isinstance(val, dict):
-        loc = str(val.get("location", "")).strip()
+def carica_csv_safe(path, cols):
+    if os.path.exists(path):
         try:
-            q = int(val.get("quantità", val.get("Quantità", 0)))
+            df = pd.read_csv(path)
+            if TS_COL in df.columns:
+                df[TS_COL] = pd.to_datetime(df[TS_COL], errors="coerce")
+            return df
         except Exception:
-            q = 0
-        if "inventory" in loc.lower():
-            result.append((loc, q))
-        return result
+            return pd.DataFrame(columns=cols)
+    return pd.DataFrame(columns=cols)
 
-    # altri tipi (numero, stringa) non considerati come location utile
-    return result
+def salva_csv(path, df):
+    df.to_csv(path, index=False)
 
-# --- Caricamento dati ---
-richiesta = carica_csv(RICHIESTE_FILE)
-stock_in_mano = carica_file_pickle(STOCK_MANO_FILE)
-stock_in_riserva = carica_file_pickle(STOCK_RISERVA_FILE)
+# ---------------- Normalization ----------------
+def norma_item(x):
+    if pd.isna(x):
+        return ""
+    return str(x).strip().upper()
 
-# In alcune vecchie versioni potresti avere valori non-normalizzati;
-# se sono singoli dict converto in dict coerente (ma mantengo compatibilità).
-if not isinstance(stock_in_mano, dict):
-    stock_in_mano = {}
-if not isinstance(stock_in_riserva, dict):
-    stock_in_riserva = {}
+def try_int(v):
+    try:
+        return int(v)
+    except Exception:
+        return 0
 
-# --- Menu ---
+# ---------------- Load persistent data ----------------
+richiesta = carica_csv_safe(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL])
+stock_in_mano_raw = carica_pickle_safe(STOCK_MANO_FILE)
+stock_in_riserva_raw = carica_pickle_safe(STOCK_RISERVA_FILE)
+
+# normalize keys to uppercase trimmed strings for consistency
+def normalize_stock_keys(orig):
+    out = {}
+    if not isinstance(orig, dict):
+        return {}
+    for k, v in orig.items():
+        nk = norma_item(k)
+        out[nk] = v
+    return out
+
+stock_in_mano = normalize_stock_keys(stock_in_mano_raw)
+stock_in_riserva = normalize_stock_keys(stock_in_riserva_raw)
+
+# ---------------- UI - Sidebar global ----------------
 page = st.sidebar.radio("Menu", [
     "Carica Stock In Mano",
     "Carica Stock Riserva",
     "Analisi Richieste & Suggerimenti"
 ])
-soglia = st.sidebar.number_input("Imposta soglia alert stock in mano", min_value=1, max_value=1000, value=20)
+soglia = st.sidebar.number_input("Soglia alert stock in mano", min_value=1, max_value=10000, value=20)
+show_debug = st.sidebar.checkbox("Mostra debug (prime chiavi)", False)
+if show_debug:
+    st.sidebar.write("Stock in mano (prime 20):", list(stock_in_mano.keys())[:20])
+    st.sidebar.write("Stock in riserva (prime 20):", list(stock_in_riserva.keys())[:20])
 
-# --- Pagine ---
+# ---------------- Page: Carica Stock In Mano ----------------
 if page == "Carica Stock In Mano":
-    st.title("📥 Carica Stock Magazzino In Mano")
-    uploaded_file = st.file_uploader("Carica file Excel stock in mano", type=["xlsx", "xls"])
-    if uploaded_file:
-        df = pd.read_excel(uploaded_file)
+    st.title("📥 Carica Stock - IN MANO")
+    up = st.file_uploader("Carica file Excel stock in mano (colonne: Item Code, Quantità, Location)", type=["xlsx", "xls"])
+    if up:
+        df = pd.read_excel(up)
+        st.write("Colonne trovate:", df.columns.tolist())
+        # try to rename common variants
+        rename = {}
+        for c in df.columns:
+            lc = c.strip().lower()
+            if lc in ["item code", "itemcode", "item number", "item_number", "item"]:
+                rename[c] = COL_ITEM_CODE
+            if lc in ["quantità", "quantita", "quantity", "qty"]:
+                rename[c] = COL_QUANTITA
+            if lc in ["location", "loc"]:
+                rename[c] = COL_LOCATION
+        if rename:
+            df.rename(columns=rename, inplace=True)
+
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns:
-            for _, row in df.iterrows():
-                item = str(row[COL_ITEM_CODE]).strip().upper()
-                try:
-                    qta = int(row.get(COL_QUANTITA, 0))
-                except Exception:
-                    qta = 0
-                loc = row.get(COL_LOCATION, "")
-                loc = "" if pd.isna(loc) else str(loc).strip()
-                stock_in_mano[item] = {"quantità": qta, "location": loc}
-            salva_file_pickle(STOCK_MANO_FILE, stock_in_mano)
-            st.success("Stock in mano aggiornato!")
+            for _, r in df.iterrows():
+                key = norma_item(r[COL_ITEM_CODE])
+                q = try_int(r.get(COL_QUANTITA, 0))
+                loc = r.get(COL_LOCATION, "") or ""
+                # store as dict for each key; if multiple lines for same item, keep last (or customize)
+                stock_in_mano[key] = {"quantità": q, "location": str(loc).strip()}
+            salva_pickle(STOCK_MANO_FILE, stock_in_mano)
+            st.success("Stock in mano salvato correttamente.")
         else:
-            st.error(f"Il file deve contenere le colonne '{COL_ITEM_CODE}' e '{COL_QUANTITA}'.")
+            st.error(f"File non contiene colonne richieste: '{COL_ITEM_CODE}', '{COL_QUANTITA}'.")
 
+# ---------------- Page: Carica Stock Riserva ----------------
 elif page == "Carica Stock Riserva":
-    st.title("📥 Carica Stock Magazzino Riserva")
-    uploaded_file = st.file_uploader("Carica file Excel stock in riserva", type=["xlsx", "xls"])
-    if uploaded_file:
-        df = pd.read_excel(uploaded_file)
-        if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns and COL_LOCATION in df.columns:
-            # raggruppa per Item + Location per sommare eventuali righe duplicate
-            grouped = df.groupby([COL_ITEM_CODE, COL_LOCATION])[COL_QUANTITA].sum().reset_index()
-            for _, row in grouped.iterrows():
-                item = str(row[COL_ITEM_CODE]).strip().upper()
-                try:
-                    qta = int(row.get(COL_QUANTITA, 0))
-                except Exception:
-                    qta = 0
-                loc = row.get(COL_LOCATION, "")
-                loc = "" if pd.isna(loc) else str(loc).strip()
-                # mantieni struttura: se già esiste ed è lista, append; se dict, converti in lista
-                existing = stock_in_riserva.get(item)
-                entry = {"quantità": qta, "location": loc}
-                if existing is None:
-                    stock_in_riserva[item] = [entry]
-                elif isinstance(existing, list):
-                    stock_in_riserva[item].append(entry)
-                elif isinstance(existing, dict):
-                    stock_in_riserva[item] = [existing, entry]
-                else:
-                    stock_in_riserva[item] = [entry]
-            salva_file_pickle(STOCK_RISERVA_FILE, stock_in_riserva)
-            st.success("Stock in riserva aggiornato!")
-        else:
-            st.error(f"Il file deve contenere le colonne '{COL_ITEM_CODE}', '{COL_QUANTITA}' e '{COL_LOCATION}'.")
+    st.title("📥 Carica Stock - RISERVA")
+    up = st.file_uploader("Carica file Excel stock riserva (Item Code, Quantità, Location)", type=["xlsx", "xls"])
+    if up:
+        df = pd.read_excel(up)
+        st.write("Colonne trovate:", df.columns.tolist())
+        rename = {}
+        for c in df.columns:
+            lc = c.strip().lower()
+            if lc in ["item code", "itemcode", "item number", "item_number", "item"]:
+                rename[c] = COL_ITEM_CODE
+            if lc in ["quantità", "quantita", "quantity", "qty"]:
+                rename[c] = COL_QUANTITA
+            if lc in ["location", "loc"]:
+                rename[c] = COL_LOCATION
+        if rename:
+            df.rename(columns=rename, inplace=True)
 
+        if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns and COL_LOCATION in df.columns:
+            # group by item+location sum quantities
+            grouped = df.groupby([COL_ITEM_CODE, COL_LOCATION])[COL_QUANTITA].sum().reset_index()
+            for _, r in grouped.iterrows():
+                key = norma_item(r[COL_ITEM_CODE])
+                q = try_int(r[COL_QUANTITA])
+                loc = str(r[COL_LOCATION]).strip()
+                existing = stock_in_riserva.get(key)
+                entry = {"quantità": q, "location": loc}
+                if existing is None:
+                    stock_in_riserva[key] = [entry]
+                elif isinstance(existing, list):
+                    existing.append(entry)
+                    stock_in_riserva[key] = existing
+                elif isinstance(existing, dict):
+                    stock_in_riserva[key] = [existing, entry]
+                else:
+                    stock_in_riserva[key] = [entry]
+            salva_pickle(STOCK_RISERVA_FILE, stock_in_riserva)
+            st.success("Stock riserva salvato correttamente.")
+        else:
+            st.error(f"File non contiene colonne richieste: '{COL_ITEM_CODE}', '{COL_QUANTITA}', '{COL_LOCATION}'.")
+
+# ---------------- Page: Analisi Richieste & Suggerimenti ----------------
 elif page == "Analisi Richieste & Suggerimenti":
     st.title("📊 Analisi Richieste & Suggerimenti")
-    uploaded_file = st.file_uploader("Carica file Excel richieste", type=["xlsx", "xls"])
-    if uploaded_file:
-        df = pd.read_excel(uploaded_file)
-        # normalizza item code a maiuscolo senza spazi
+
+    up = st.file_uploader("Carica file Excel richieste (Item Code, Requested_quantity, Order Number)", type=["xlsx", "xls"])
+    if up:
+        df = pd.read_excel(up)
+        st.write("Colonne trovate:", df.columns.tolist())
+        rename = {}
+        for c in df.columns:
+            lc = c.strip().lower()
+            if lc in ["item code", "itemcode", "item number", "item_number", "item"]:
+                rename[c] = COL_ITEM_CODE
+            if lc in ["requested quantity", "requested_quantity", "requestedquantity", "quantità richiesta", "quantita richiesta"]:
+                rename[c] = COL_QTA_RICHIESTA
+            if lc in ["order number", "ordernumber", "order"]:
+                rename[c] = COL_ORDER
+        if rename:
+            df.rename(columns=rename, inplace=True)
+
         if COL_ITEM_CODE in df.columns:
-            df[COL_ITEM_CODE] = df[COL_ITEM_CODE].astype(str).str.strip().str.upper()
-        df["Timestamp"] = pd.Timestamp.now()
+            df[COL_ITEM_CODE] = df[COL_ITEM_CODE].apply(norma_item)
+        df[TS_COL] = pd.Timestamp.now()
+
         if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
-            richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, "Timestamp"]]], ignore_index=True)
+            if COL_ORDER not in df.columns:
+                df[COL_ORDER] = pd.NA
+            richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL]]], ignore_index=True)
             salva_csv(RICHIESTE_FILE, richiesta)
-            st.success("Storico richieste aggiornato!")
+            st.success("Richieste aggiunte allo storico.")
         else:
-            st.error(f"Il file deve contenere le colonne '{COL_ITEM_CODE}' e '{COL_QTA_RICHIESTA}'.")
+            st.error(f"Il file richieste deve contenere almeno '{COL_ITEM_CODE}' e '{COL_QTA_RICHIESTA}'.")
 
     if richiesta.empty:
-        st.info("Nessun dato richieste disponibile.")
+        st.info("Nessuno storico richieste presente. Carica almeno un file richieste.")
     else:
-        st.subheader("📈 Item più richiesti (ultimo mese)")
-        un_mese_fa = pd.Timestamp.now() - pd.Timedelta(days=30)
-        recenti = richiesta[richiesta["Timestamp"] >= un_mese_fa]
+        # aggregate last 30 days
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+        recenti = richiesta[richiesta[TS_COL] >= cutoff]
         try:
-            richieste_aggregate = recenti.groupby(COL_ITEM_CODE)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
+            agg = recenti.groupby(COL_ITEM_CODE)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
         except Exception:
-            richieste_aggregate = pd.Series(dtype=float)
+            agg = pd.Series(dtype=float)
 
-        if not richieste_aggregate.empty:
-            st.write(richieste_aggregate.head(10))
+        st.subheader("📈 Item più richiesti (ultimi 30 giorni)")
+        if not agg.empty:
+            st.write(agg.head(10))
             fig, ax = plt.subplots()
-            richieste_aggregate.head(10).plot.pie(ax=ax, autopct='%1.1f%%', startangle=90)
+            agg.head(10).plot.pie(ax=ax, autopct='%1.1f%%', startangle=90)
             ax.set_ylabel('')
             st.pyplot(fig)
         else:
             st.info("Nessun dato richieste recenti.")
 
-        # ---------- Alert stock basso con segnalazione location riserva ----------
-        st.subheader("⚠️ Alert stock basso")
-        alert_trovati = False
-        for item, totale_richiesto in richieste_aggregate.items():
-            # item è già maiuscolo perché normalizzato in caricamento richieste
-            item_key = str(item).strip().upper()
-            qta_in_mano = 0
-            loc_in_mano = "non definita"
-            mano_record = stock_in_mano.get(item_key)
-            if isinstance(mano_record, dict):
-                try:
-                    qta_in_mano = int(mano_record.get("quantità", 0))
-                except Exception:
-                    qta_in_mano = 0
-                loc_in_mano = mano_record.get("location", "non definita") or "non definita"
-            elif isinstance(mano_record, (list, tuple)):
-                # somma quantità se è lista
-                total = 0
-                loc_candidate = ""
-                for rec in mano_record:
-                    if isinstance(rec, dict):
-                        try:
-                            total += int(rec.get("quantità", 0))
-                        except Exception:
-                            pass
-                        if not loc_candidate:
-                            loc_candidate = rec.get("location", "")
-                qta_in_mano = total
-                loc_in_mano = loc_candidate or "non definita"
-            elif isinstance(mano_record, (int, float, str)):
-                try:
-                    qta_in_mano = int(mano_record)
-                except Exception:
-                    qta_in_mano = 0
+        # --- Alert stock basso expander (with inventory suggestions) ---
+        with st.expander("⚠️ Alert stock basso"):
+            alert_rows = []
+            for item, tot_req in agg.items():
+                key = norma_item(item)
+                mano_rec = stock_in_mano.get(key, {})
+                # quantity in mano
+                q_mano = 0
+                loc_mano = "non definita"
+                if isinstance(mano_rec, dict):
+                    q_mano = try_int(mano_rec.get("quantità", 0))
+                    loc_mano = mano_rec.get("location", "") or "non definita"
+                elif isinstance(mano_rec, (list, tuple)):
+                    total = 0
+                    loc_candidate = ""
+                    for rec in mano_rec:
+                        if isinstance(rec, dict):
+                            total += try_int(rec.get("quantità", 0))
+                            if not loc_candidate:
+                                loc_candidate = rec.get("location", "")
+                    q_mano = total
+                    loc_mano = loc_candidate or "non definita"
 
-            if qta_in_mano < soglia:
-                # trova tutte le location di riserva che contengono 'inventory'
-                reserve_locs = get_reserve_locations_for_item(stock_in_riserva, item_key)
-                if reserve_locs:
-                    # crea messaggio con location e quantità
-                    suggerimenti = [f"{q} da {loc}" for (loc, q) in reserve_locs if q > 0]
-                    if suggerimenti:
-                        st.warning(f"'{item_key}' è sotto soglia! In magazzino: {qta_in_mano} (Location: {loc_in_mano}). "
-                                   f"Richiamare da: {', '.join(suggerimenti)}")
+                if q_mano < soglia:
+                    # find reserve locations with 'inventory'
+                    reserve_locs = []
+                    val = stock_in_riserva.get(key)
+                    if isinstance(val, dict):
+                        loc = str(val.get("location", "")).strip()
+                        q = try_int(val.get("quantità", 0))
+                        if "inventory" in loc.lower():
+                            reserve_locs.append((loc, q))
+                    elif isinstance(val, (list, tuple)):
+                        for rec in val:
+                            if isinstance(rec, dict):
+                                loc = str(rec.get("location", "")).strip()
+                                q = try_int(rec.get("quantità", 0))
+                                if "inventory" in loc.lower():
+                                    reserve_locs.append((loc, q))
+                    # build message
+                    if reserve_locs:
+                        suggestions = [f"{q} da {loc}" for (loc, q) in reserve_locs]
+                        st.warning(f"'{key}' sotto soglia! In mano: {q_mano} ({loc_mano}). Suggerito da riserva: {', '.join(suggestions)}")
+                        reserve_str = "; ".join([f"{loc} ({q})" for loc, q in reserve_locs])
                     else:
-                        st.warning(f"'{item_key}' è sotto soglia! In magazzino: {qta_in_mano} (Location: {loc_in_mano}). "
-                                   f"Nessuna quantità disponibile nelle location INVENTORY.")
-                else:
-                    st.warning(f"'{item_key}' è sotto soglia! In magazzino: {qta_in_mano} (Location: {loc_in_mano}). "
-                               f"Nessuna riserva trovata con 'inventory'.")
-                alert_trovati = True
+                        st.warning(f"'{key}' sotto soglia! In mano: {q_mano} ({loc_mano}). Nessuna location INVENTORY trovata.")
+                        reserve_str = ""
+                    alert_rows.append({
+                        "Item Code": key,
+                        "Quantità in mano": q_mano,
+                        "Location in mano": loc_mano,
+                        "Location riserva INVENTORY": reserve_str
+                    })
+            # download report alert if any
+            if alert_rows:
+                df_alert = pd.DataFrame(alert_rows).sort_values("Item Code").reset_index(drop=True)
+                buf = BytesIO()
+                df_alert.to_excel(buf, index=False)
+                st.download_button(
+                    label="📥 Scarica report alert (Excel)",
+                    data=buf.getvalue(),
+                    file_name="alert_stock_basso.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.success("Nessun alert: tutti gli stock in mano sono sopra la soglia.")
 
-        if not alert_trovati:
-            st.success("Nessun alert: tutti gli stock in mano sono sopra la soglia.")
-
-        # --- Verifica per Order Number (raggruppata per Item Code) ---
-        st.markdown("## 🔍 Verifica disponibilità per ordine specifico")
-        if COL_ORDER in richiesta.columns:
-            ordine_unico = st.selectbox("Seleziona un Order Number", richiesta[COL_ORDER].dropna().unique())
-            if st.button("Verifica disponibilità per ordine"):
-                filtro_ordine = richiesta[richiesta[COL_ORDER] == ordine_unico]
-                # raggruppa per item e somma requested_quantity per evitare duplicati
-                grouped = filtro_ordine.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
+        # --- Verifica disponibilità per Order Number (select + button) ---
+        st.markdown("## 🔍 Verifica disponibilità per Order Number")
+        order_list = richiesta[COL_ORDER].dropna().unique().tolist()
+        if not order_list:
+            st.info("Nessun Order Number nello storico richieste.")
+        else:
+            ordine_sel = st.selectbox("Seleziona Order Number", order_list)
+            if st.button("Verifica ordine"):
+                filtro = richiesta[richiesta[COL_ORDER] == ordine_sel]
+                # group by item and sum requested quantity to avoid duplicates
+                grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
 
                 rows = []
-                for _, riga in grouped.iterrows():
-                    item = str(riga[COL_ITEM_CODE]).strip().upper()
-                    richiesta_qta = int(riga[COL_QTA_RICHIESTA]) if pd.notna(riga[COL_QTA_RICHIESTA]) else 0
+                verifica_rows_to_save = []  # for storico_verifiche.csv
 
-                    mano_record = stock_in_mano.get(item, {})
-                    qta_stock = 0
-                    loc_stock = "non definita"
-                    if isinstance(mano_record, dict):
-                        qta_stock = int(mano_record.get("quantità", 0)) if mano_record.get("quantità", None) is not None else 0
-                        loc_stock = mano_record.get("location", "non definita") or "non definita"
-                    elif isinstance(mano_record, (list, tuple)):
+                for _, r in grouped.iterrows():
+                    item = norma_item(r[COL_ITEM_CODE])
+                    req_qta = try_int(r[COL_QTA_RICHIESTA])
+                    # stock in mano
+                    mano_rec = stock_in_mano.get(item, {})
+                    q_mano = 0
+                    loc_mano = "non definita"
+                    if isinstance(mano_rec, dict):
+                        q_mano = try_int(mano_rec.get("quantità", 0))
+                        loc_mano = mano_rec.get("location", "") or "non definita"
+                    elif isinstance(mano_rec, (list, tuple)):
                         total = 0
-                        loc_candidate = ""
-                        for rec in mano_record:
+                        loc_cand = ""
+                        for rec in mano_rec:
                             if isinstance(rec, dict):
-                                try:
-                                    total += int(rec.get("quantità", 0))
-                                except Exception:
-                                    pass
-                                if not loc_candidate:
-                                    loc_candidate = rec.get("location", "")
-                        qta_stock = total
-                        loc_stock = loc_candidate or "non definita"
-                    elif isinstance(mano_record, (int, float, str)):
-                        try:
-                            qta_stock = int(mano_record)
-                        except Exception:
-                            qta_stock = 0
+                                total += try_int(rec.get("quantità", 0))
+                                if not loc_cand:
+                                    loc_cand = rec.get("location", "")
+                        q_mano = total
+                        loc_mano = loc_cand or "non definita"
 
-                    if qta_stock >= richiesta_qta:
-                        rows.append({
-                            "Item Code": item,
-                            "Requested Quantity": richiesta_qta,
-                            "Available in Stock": qta_stock,
-                            "Location in Mano": loc_stock,
-                            "Reserve Locations (INVENTORY)": "",
-                            "Status": "✅ Disponibile"
-                        })
+                    if q_mano >= req_qta:
+                        status = "✅ Disponibile"
+                        quantita_da_prelevare = 0
+                        reserve_locations_str = ""
                     else:
-                        mancanti = richiesta_qta - qta_stock
-                        reserve_locs = get_reserve_locations_for_item(stock_in_riserva, item)
-                        reserve_str = ""
-                        total_res = 0
-                        if reserve_locs:
-                            parts = []
-                            for loc, q in reserve_locs:
-                                parts.append(f"{q} da {loc}")
-                                total_res += int(q)
-                            reserve_str = "; ".join(parts)
-                        if total_res >= mancanti and total_res > 0:
+                        missing = req_qta - q_mano
+                        # collect reserve locations containing 'inventory'
+                        reserve_list = []
+                        val = stock_in_riserva.get(item)
+                        if isinstance(val, dict):
+                            loc = str(val.get("location", "")).strip()
+                            q = try_int(val.get("quantità", 0))
+                            if "inventory" in loc.lower():
+                                reserve_list.append((loc, q))
+                        elif isinstance(val, (list, tuple)):
+                            for rec in val:
+                                if isinstance(rec, dict):
+                                    loc = str(rec.get("location", "")).strip()
+                                    q = try_int(rec.get("quantità", 0))
+                                    if "inventory" in loc.lower():
+                                        reserve_list.append((loc, q))
+                        reserve_info_parts = []
+                        total_res_available = 0
+                        for loc, q in reserve_list:
+                            take = min(missing, q)
+                            if q > 0:
+                                reserve_info_parts.append(f"{loc} ({q})")
+                                total_res_available += q
+                        reserve_locations_str = "; ".join(reserve_info_parts)
+                        if total_res_available >= missing and total_res_available > 0:
                             status = "⚠ Da riserva (coperto)"
-                        elif total_res > 0:
+                            quantita_da_prelevare = missing
+                        elif total_res_available > 0:
                             status = "❌ Non sufficiente (anche da riserva)"
+                            quantita_da_prelevare = missing
                         else:
                             status = "❌ Non disponibile in riserva INVENTORY"
+                            quantita_da_prelevare = missing
 
-                        rows.append({
-                            "Item Code": item,
-                            "Requested Quantity": richiesta_qta,
-                            "Available in Stock": qta_stock,
-                            "Location in Mano": loc_stock,
-                            "Reserve Locations (INVENTORY)": reserve_str,
-                            "Status": status
-                        })
+                    rows.append({
+                        "Item Code": item,
+                        "Requested_quantity": req_qta,
+                        "Quantità disponibile": q_mano,
+                        "Location stock in mano": loc_mano,
+                        "Quantità da prelevare": quantita_da_prelevare,
+                        "Location riserva (INVENTORY)": reserve_locations_str,
+                        "Status": status
+                    })
 
-                # mostra tabella (sicurezza stringhe e ordinamento)
+                    # prepare a row for storico_verifiche
+                    verifica_rows_to_save.append({
+                        "Verification Timestamp": pd.Timestamp.now(),
+                        "Order Number": ordine_sel,
+                        "Item Code": item,
+                        "Requested_quantity": req_qta,
+                        "Available_in_Stock": q_mano,
+                        "Location_in_Stock": loc_mano,
+                        "Quantity_missing": quantita_da_prelevare,
+                        "Reserve_Locations_INVENTORY": reserve_locations_str,
+                        "Status": status
+                    })
+
+                # display results
                 if rows:
-                    df_result = pd.DataFrame(rows)
-                    if "Item Code" not in df_result.columns:
-                        df_result["Item Code"] = ""
-                    df_result["Item Code"] = df_result["Item Code"].astype(str).str.strip()
+                    df_res = pd.DataFrame(rows)
+                    # color by status using pandas Styler
+                    def color_row(row):
+                        stt = str(row.get("Status", "")).lower()
+                        if "❌" in stt or "non sufficiente" in stt or "non disponibile" in stt:
+                            color = "background-color: #f7c6c6"
+                        elif "⚠" in stt or "da riserva" in stt:
+                            color = "background-color: #fff2b8"
+                        elif "✅" in stt or "disponibile" in stt:
+                            color = "background-color: #d8f3d8"
+                        else:
+                            color = ""
+                        return [color] * len(row)
+
                     try:
-                        df_result = df_result.sort_values(["Status", "Item Code"], ascending=[True, True]).reset_index(drop=True)
+                        df_res = df_res.sort_values(["Status", "Item Code"], ascending=[True, True]).reset_index(drop=True)
                     except Exception:
-                        df_result = df_result.sort_values("Item Code", key=lambda s: s.astype(str)).reset_index(drop=True)
-                    st.dataframe(df_result)
-                    # download
+                        df_res = df_res.sort_values("Item Code", key=lambda s: s.astype(str)).reset_index(drop=True)
+
+                    styled = df_res.style.apply(color_row, axis=1)
+                    st.dataframe(styled)
+
+                    # download result excel
                     buf = BytesIO()
-                    df_result.to_excel(buf, index=False)
+                    df_res.to_excel(buf, index=False)
                     buf.seek(0)
                     st.download_button(
-                        label="📥 Scarica risultati in Excel",
-                        data=buf,
-                        file_name=f"verifica_ordine_{ordine_unico}.xlsx",
+                        label="📥 Scarica report ordine (Excel)",
+                        data=buf.getvalue(),
+                        file_name=f"report_{ordine_sel}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                else:
-                    st.info("Nessun articolo trovato per questo ordine.")
-        else:
-            st.info("Nessuna colonna Order Number nello storico richieste.")
 
-# --- Barra laterale: Ricerca Rapida ---
+                    # --- append verification rows to storico_verifiche.csv (file unico) ---
+                    df_ver = pd.DataFrame(verifica_rows_to_save)
+                    # ensure file exists or append appropriately
+                    if os.path.exists(STORICO_VERIFICHE_FILE):
+                        try:
+                            existing = pd.read_csv(STORICO_VERIFICHE_FILE)
+                            combined = pd.concat([existing, df_ver], ignore_index=True)
+                        except Exception:
+                            combined = df_ver
+                    else:
+                        combined = df_ver
+                    # convert timestamp column to iso format for CSV
+                    if "Verification Timestamp" in combined.columns:
+                        combined["Verification Timestamp"] = pd.to_datetime(combined["Verification Timestamp"], errors="coerce")
+                    salva_csv(STORICO_VERIFICHE_FILE, combined)
+                    st.success(f"✅ Verifica salvata in '{STORICO_VERIFICHE_FILE}'.")
+                else:
+                    st.info("Nessun articolo trovato per questo Order Number.")
+
+# ---------------- Sidebar: ricerca Item & Location ----------------
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔎 Ricerca Item")
-query = st.sidebar.text_input("Cerca Item Code")
-if query:
-    q = str(query).strip().upper()
-    trovato = False
+st.sidebar.markdown("### 🔎 Ricerca Rapida")
+
+# search by Item Code
+query_item = st.sidebar.text_input("Cerca per Item Code")
+if query_item:
+    q = norma_item(query_item)
+    found = False
     if q in stock_in_mano:
         rec = stock_in_mano[q]
         if isinstance(rec, dict):
-            st.sidebar.success(f"[In Mano] Quantità: {rec.get('quantità',0)} | Location: {rec.get('location','')}")
-        elif isinstance(rec, (list, tuple)):
+            st.sidebar.success(f"[In Mano] {rec.get('quantità',0)} @ {rec.get('location','')}")
+        elif isinstance(rec, (list,tuple)):
             lines = []
-            for e in rec:
-                if isinstance(e, dict):
-                    lines.append(f"{e.get('location','')}: {e.get('quantità',0)}")
+            for r in rec:
+                if isinstance(r, dict):
+                    lines.append(f"{r.get('location','')}: {r.get('quantità',0)}")
             st.sidebar.success("[In Mano]\n" + "\n".join(lines))
-        else:
-            st.sidebar.success(f"[In Mano] {rec}")
-        trovato = True
+        found = True
     if q in stock_in_riserva:
-        lst = stock_in_riserva[q]
-        lines = []
-        for rec in lst:
-            if isinstance(rec, dict):
-                lines.append(f"{rec.get('location','')}: {rec.get('quantità',0)}")
-        st.sidebar.info("[In Riserva]\n" + "\n".join(lines))
-        trovato = True
-    if not trovato:
-        st.sidebar.warning("Item non trovato.")
+        rec = stock_in_riserva[q]
+        if isinstance(rec, dict):
+            st.sidebar.info(f"[In Riserva] {rec.get('quantità',0)} @ {rec.get('location','')}")
+        elif isinstance(rec, (list,tuple)):
+            lines = []
+            for r in rec:
+                if isinstance(r, dict):
+                    s = f"{r.get('location','')}: {r.get('quantità',0)}"
+                    if "inventory" in str(r.get('location','')).lower():
+                        s += "  <-- INVENTORY"
+                    lines.append(s)
+            st.sidebar.info("[In Riserva]\n" + "\n".join(lines))
+        found = True
+    if not found:
+        st.sidebar.warning("Item non trovato in nessuno stock.")
+
+# filter by Location
+st.sidebar.markdown("### 📍 Filtra per Location")
+all_locations = set()
+for d in (stock_in_mano, stock_in_riserva):
+    for v in d.values():
+        if isinstance(v, dict):
+            loc = v.get("location", "")
+            if loc:
+                all_locations.add(loc)
+        elif isinstance(v, (list,tuple)):
+            for rec in v:
+                if isinstance(rec, dict):
+                    loc = rec.get("location","")
+                    if loc:
+                        all_locations.add(loc)
+
+if all_locations:
+    sel_loc = st.sidebar.selectbox("Seleziona Location", sorted(all_locations))
+    if sel_loc:
+        st.sidebar.markdown(f"**Item in '{sel_loc}':**")
+        for label, d in [("In Mano", stock_in_mano), ("In Riserva", stock_in_riserva)]:
+            items_here = {k:v for k,v in d.items() if (
+                (isinstance(v, dict) and v.get("location","")==sel_loc) or
+                (isinstance(v, (list,tuple)) and any((isinstance(r, dict) and r.get("location","")==sel_loc) for r in v))
+            )}
+            if items_here:
+                st.sidebar.write(f"**{label}:**")
+                for item_code, rec in items_here.items():
+                    if isinstance(rec, dict):
+                        st.sidebar.write(f"- {item_code} → {rec.get('quantità',0)}")
+                    else:
+                        # list
+                        for r in rec:
+                            if isinstance(r, dict) and r.get("location","")==sel_loc:
+                                st.sidebar.write(f"- {item_code} → {r.get('quantità',0)}")
+else:
+    st.sidebar.info("Nessuna location registrata nei dati caricati.")
