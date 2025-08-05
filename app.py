@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import pickle
 import os
+import datetime
 import matplotlib.pyplot as plt
-# --- Configurazione pagina ---
 st.set_page_config(page_title="RAD-TEST", page_icon=":provetta:")
 st.markdown("""
     <div style="display:flex; align-items:center; gap:15px;">
@@ -87,6 +87,13 @@ elif page == "Analisi Richieste & Suggerimenti":
     uploaded_file = st.file_uploader("Carica file Excel richieste", type=["xlsx", "xls"])
     if uploaded_file:
         df = pd.read_excel(uploaded_file)
+        # Correggi nomi colonne automaticamente
+        df.rename(columns=lambda x: x.strip(), inplace=True)
+        df.rename(columns={
+            'Requested Quantity': COL_QTA_RICHIESTA,
+            'Order number': COL_ORDER,
+            'Item number': COL_ITEM_CODE
+        }, inplace=True)
         df["Timestamp"] = pd.Timestamp.now()
         if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
             richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, "Timestamp"]]], ignore_index=True)
@@ -135,13 +142,15 @@ elif page == "Analisi Richieste & Suggerimenti":
                                     qta_da_prendere = min(mancante, riserva_qta)
                                     suggerimenti.append(f"- {qta_da_prendere} da {info['location']}")
                         if suggerimenti:
-                            messaggio = f":avviso: '{item}' mancano {mancante} pezzi.\nSuggerimenti:\n" + "\n".join(suggerimenti)
+                            messaggio = f":avviso: '{item}' mancano {mancante} pezzi.
+Suggerimenti:
+" + "\n".join(suggerimenti)
                             st.warning(messaggio)
                         else:
                             st.error(f":x: '{item}' non disponibile in stock né in magazzini con 'inventory'.")
-# --- Sidebar: Ricerca item ---
+# --- Barra laterale: Ricerca Stock ---
 st.sidebar.markdown("---")
-st.sidebar.markdown("### :lente: Ricerca Item")
+st.sidebar.markdown("### :lente_a_destra: Ricerca Item")
 query = st.sidebar.text_input("Cerca Item Code")
 if query:
     query = query.strip()
