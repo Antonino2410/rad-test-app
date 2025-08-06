@@ -1,4 +1,4 @@
-# app.py - RAD-TEST (versione completa aggiornata)
+# app.py - RAD-TEST (versione corretta: somma totale affidabile per tutti gli item)
 import re
 import streamlit as st
 import pandas as pd
@@ -64,18 +64,14 @@ def norma_item(x):
     """Normalizza Item Code: gestisce int/float/str e rimuove .0 finali."""
     if pd.isna(x):
         return ""
-    # numeri interi
     if isinstance(x, int):
         return str(x)
-    # float che rappresentano numeri interi come 100012431.0
     if isinstance(x, float):
         if x.is_integer():
             return str(int(x))
         return repr(x)
     s = str(x).strip()
-    # rimuovi caratteri invisibili
     s = s.replace('\u200b', '').strip()
-    # se pattern come "12345.0" trasformalo in "12345"
     if re.match(r'^\d+\.0+$', s):
         s = s.split('.')[0]
     return s.upper()
@@ -84,7 +80,6 @@ def try_int(v):
     """Parsing robusto di quantità: gestisce int/float/string con separatori."""
     if v is None:
         return 0
-    # direct numeric
     try:
         if isinstance(v, int):
             return int(v)
@@ -96,7 +91,6 @@ def try_int(v):
     if s == "":
         return 0
     s = s.replace(" ", "").replace("'", "")
-    # both separators present
     if "." in s and "," in s:
         last_dot = s.rfind('.')
         last_comma = s.rfind(',')
@@ -138,37 +132,45 @@ def ensure_list_entry(v):
     except Exception:
         return []
 
+# ----------- FIXED get_locations_and_total -----------
 def get_locations_and_total(stock_dict, key):
     """
     Restituisce (list_of_tuples [(location, qty), ...], total_qty).
-    key is già normalizzato.
+    Fa robusta normalizzazione: accetta dict, list, valori singoli.
     """
     entries = stock_dict.get(key)
-    locs = []
-    total = 0
-
-    # Se None o non trovata
     if entries is None:
         return [], 0
 
-    # Assicurati che sia una lista
+    # Normalize entries to a list of dicts
     if isinstance(entries, dict):
-        entries = [entries]
-    elif not isinstance(entries, list):
-        # fallback su valore singolo
+        entries_list = [entries]
+    elif isinstance(entries, (list, tuple)):
+        entries_list = list(entries)
+    else:
+        # fallback: single numeric/string quantity
         q = try_int(entries)
         return [("", q)], q
 
-    # Ora entries è una lista di dict
-    for rec in entries:
-        if isinstance(rec, dict):
-            loc = str(rec.get("location", "")).strip()
-            q = try_int(rec.get("quantità", 0))
-            locs.append((loc, q))
+    locs = []
+    total = 0
+    for rec in entries_list:
+        if not isinstance(rec, dict):
+            # try to interpret simple numeric entry
+            q = try_int(rec)
+            locs.append(("", q))
             total += q
+            continue
+        loc = str(rec.get("location", "") or "").strip()
+        q = try_int(rec.get("quantità", 0))
+        locs.append((loc, q))
+        total += q
 
     return locs, total
-    
+
+def deep_copy_stock(s):
+    return copy.deepcopy(s)
+
 # ---------------- Load persistent data ----------------
 richiesta = carica_csv_safe(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL])
 stock_in_mano_raw = carica_pickle_safe(STOCK_MANO_FILE)
@@ -215,7 +217,6 @@ if page == "Carica Stock In Mano":
     if up:
         df = pd.read_excel(up)
         st.write("Colonne trovate:", df.columns.tolist())
-        # try rename common columns
         rename = {}
         for c in df.columns:
             lc = c.strip().lower()
@@ -228,7 +229,6 @@ if page == "Carica Stock In Mano":
         if rename:
             df.rename(columns=rename, inplace=True)
 
-        # Aggregate by Item Code + Location
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns and COL_LOCATION in df.columns:
             grouped = df.groupby([COL_ITEM_CODE, COL_LOCATION])[COL_QUANTITA].sum().reset_index()
             for _, r in grouped.iterrows():
@@ -238,7 +238,6 @@ if page == "Carica Stock In Mano":
                 existing = stock_in_mano.get(key, [])
                 existing.append({"quantità": q, "location": loc})
                 stock_in_mano[key] = existing
-            # persist normalized structure
             salva_pickle(STOCK_MANO_FILE, stock_in_mano)
             st.success("Stock in mano salvato e aggregato correttamente.")
         else:
@@ -313,7 +312,6 @@ elif page == "Analisi Richieste & Suggerimenti":
     if richiesta.empty:
         st.info("Nessuno storico richieste presente. Carica un file richieste.")
     else:
-        # aggregate last 30 days
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
         recenti = richiesta[richiesta[TS_COL] >= cutoff]
         try:
@@ -331,7 +329,6 @@ elif page == "Analisi Richieste & Suggerimenti":
         else:
             st.info("Nessun dato richieste recenti.")
 
-        # --- Alert stock basso expander (with inventory suggestions) ---
         with st.expander("⚠️ Alert stock basso"):
             alert_rows = []
             for item, tot_req in agg.items():
@@ -340,7 +337,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                 loc_mano_display = locs_mano[0][0] if locs_mano else "non definita"
                 q_mano = total_mano
                 if q_mano < soglia:
-                    # find reserve locations with 'inventory'
                     reserve_locs = []
                     val = stock_in_riserva.get(key, [])
                     for rec in val:
@@ -375,7 +371,6 @@ elif page == "Analisi Richieste & Suggerimenti":
             else:
                 st.success("Nessun alert: tutti gli stock in mano sono sopra la soglia.")
 
-        # ---------------- Verifica disponibilità per Order Number ----------------
         st.markdown("## 🔍 Verifica disponibilità per Order Number")
         order_list = richiesta[COL_ORDER].dropna().unique().tolist()
         if not order_list:
@@ -387,12 +382,11 @@ elif page == "Analisi Richieste & Suggerimenti":
                 grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
 
                 rows = []
-                pending_allocations = []  # planned picks
+                pending_allocations = []
                 for _, r in grouped.iterrows():
                     item = norma_item(r[COL_ITEM_CODE])
                     req_qta = try_int(r[COL_QTA_RICHIESTA])
 
-                    # compute available in mano (sum all locations)
                     locs_mano, q_mano = get_locations_and_total(stock_in_mano, item)
                     loc_mano_display = "; ".join([f"{l} ({q})" for l,q in locs_mano]) if locs_mano else "non definita"
 
@@ -414,7 +408,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                         })
                     else:
                         missing = req_qta - q_mano
-                        # build reserve list (inventory only) with (loc, qty)
                         reserve_list = []
                         val = stock_in_riserva.get(item, [])
                         for rec in val:
@@ -423,7 +416,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 q = try_int(rec.get("quantità", 0))
                                 if "inventory" in loc.lower():
                                     reserve_list.append([loc, q])
-                        # greedy allocate
                         allocs = []
                         left = missing
                         for loc, q in reserve_list:
@@ -458,7 +450,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                             "reserve_alloc": allocs
                         })
 
-                # save pending allocations and backup
                 st.session_state["pending_picks"] = pending_allocations
                 st.session_state["pre_pick_backup"][ordine_sel] = {
                     "mano": deep_copy_stock(stock_in_mano),
@@ -467,7 +458,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                 st.session_state["confirm_disabled_for_order"][ordine_sel] = False
                 st.session_state["confirm_prompt"] = {"type": None, "order": None}
 
-                # display results + download
                 if rows:
                     df_res = pd.DataFrame(rows)
                     try:
@@ -487,7 +477,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                 else:
                     st.info("Nessun articolo trovato per questo ordine.")
 
-            # --- After verification: Confirm / Undo with modal-like confirmation ---
+            # Confirm / Undo UI (same logic as before)
             if st.session_state.get("pending_picks"):
                 ordine_key = ordine_sel
                 confirmed_flag = st.session_state["confirm_disabled_for_order"].get(ordine_key, False)
@@ -497,7 +487,6 @@ elif page == "Analisi Richieste & Suggerimenti":
 
                 col1, col2 = st.columns(2)
 
-                # CONFIRM LOGIC
                 with col1:
                     if st.button("✅ Conferma prelievo", disabled=confirmed_flag, key=f"confirm_btn_{ordine_key}"):
                         st.session_state["confirm_prompt"] = {"type": "confirm", "order": ordine_key}
@@ -519,7 +508,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 pending = st.session_state.get("pending_picks", [])
                                 for pick in pending:
                                     item = pick["item"]
-                                    # subtract from mano
                                     take_from_mano = pick.get("from_mano", 0)
                                     if take_from_mano and item in stock_in_mano:
                                         rec_list = stock_in_mano[item]
@@ -537,7 +525,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                                             newlist.append(r)
                                         stock_in_mano[item] = newlist
 
-                                    # subtract from reserve allocations
                                     for alloc in pick.get("reserve_alloc", []):
                                         loc = alloc["location"]
                                         qty_to_take = alloc["qty"]
@@ -553,12 +540,10 @@ elif page == "Analisi Richieste & Suggerimenti":
                                             newlist.append(r)
                                         stock_in_riserva[item] = newlist
 
-                                # persist
                                 salva_pickle(STOCK_MANO_FILE, stock_in_mano)
                                 salva_pickle(STOCK_RISERVA_FILE, stock_in_riserva)
                                 st.session_state["confirm_disabled_for_order"][ordine_key] = True
 
-                                # log verification rows into storico_verifiche.csv
                                 ver_rows = []
                                 for pick in st.session_state.get("pending_picks", []):
                                     item = pick["item"]
@@ -590,7 +575,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 st.session_state["confirm_prompt"] = {"type": None, "order": None}
                                 st.info("Operazione di conferma annullata dall'utente.")
 
-                # UNDO LOGIC
                 with col2:
                     undo_disabled = not st.session_state["confirm_disabled_for_order"].get(ordine_key, False)
                     if st.button("↩️ Annulla prelievo", disabled=undo_disabled, key=f"undo_btn_{ordine_key}"):
@@ -608,7 +592,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                             if st.button("Sì, annulla", key=f"undo_yes_{ordine_key}"):
                                 backup = st.session_state["pre_pick_backup"].get(ordine_key)
                                 if backup:
-                                    # restore
                                     stock_in_mano = backup.get("mano", stock_in_mano)
                                     stock_in_riserva = backup.get("riserva", stock_in_riserva)
                                     salva_pickle(STOCK_MANO_FILE, stock_in_mano)
@@ -624,7 +607,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 st.session_state["confirm_prompt"] = {"type": None, "order": None}
                                 st.info("Annullamento prelievo cancellato dall'utente.")
 
-# ---------------- Sidebar: Ricerca Item & Location (Totale + location principale) ----------------
+# ---------------- Sidebar: Ricerca Rapida (Totale + location principale) ----------------
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔎 Ricerca Rapida")
 
@@ -633,7 +616,6 @@ if query_item:
     q = norma_item(query_item)
     found = False
 
-    # In Mano -> totale + prima location trovata
     locs_mano, total_mano = get_locations_and_total(stock_in_mano, q)
     if locs_mano:
         primary_loc_mano = locs_mano[0][0] or "Location non specificata"
@@ -642,7 +624,6 @@ if query_item:
     else:
         st.sidebar.info("Nessuna presenza in mano.")
 
-    # In Riserva -> totale + prima location (mostra INVENTORY se presente)
     locs_ris, total_ris = get_locations_and_total(stock_in_riserva, q)
     if locs_ris:
         primary_loc_ris = locs_ris[0][0] or "Location non specificata"
@@ -691,4 +672,3 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
-
