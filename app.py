@@ -1,4 +1,4 @@
-# app.py - RAD-TEST (versione corretta: somma per location affidabile)
+# app.py - RAD-TEST (mostra la location principale: quantità massima, non la somma totale)
 import re
 import streamlit as st
 import pandas as pd
@@ -91,6 +91,7 @@ def try_int(v):
     if s == "":
         return 0
     s = s.replace(" ", "").replace("'", "")
+    # gestione separatori
     if "." in s and "," in s:
         last_dot = s.rfind('.')
         last_comma = s.rfind(',')
@@ -132,42 +133,43 @@ def ensure_list_entry(v):
     except Exception:
         return []
 
-# ----------- FIXED get_locations_and_total (aggregazione per location) -----------
+# ----------- get_locations_and_total (location principale: quantità massima) -----------
 def get_locations_and_total(stock_dict, key):
     """
-    Restituisce (list_of_tuples [(location, qty), ...], total_qty).
-    Aggrega le quantità **per singola location** (normalizzando location con strip)
-    e restituisce la lista ordinata per quantità decrescente (location principale prima).
+    Restituisce (list_of_tuples [(location, qty)], main_qty).
+    Qui prendiamo LA location principale: la riga con quantità *maggiore*.
+    Restituiamo la lista con un solo elemento (location_principale, qty) se presente.
+    main_qty è la quantità di quella location.
     """
     entries = stock_dict.get(key)
     if entries is None:
         return [], 0
 
-    # Normalize entries to a list
+    # Normalize entries to list
     if isinstance(entries, dict):
         entries_list = [entries]
     elif isinstance(entries, (list, tuple)):
         entries_list = list(entries)
     else:
-        # fallback: single numeric/string quantity
         q = try_int(entries)
         return [("", q)], q
 
-    # aggregate per location (normalized)
-    loc_map = {}
+    max_loc = None
+    max_qty = -1
     for rec in entries_list:
         if not isinstance(rec, dict):
             q = try_int(rec)
-            loc_map[""] = loc_map.get("", 0) + q
-            continue
-        loc = str(rec.get("location", "") or "").strip()
-        q = try_int(rec.get("quantità", 0))
-        loc_map[loc] = loc_map.get(loc, 0) + q
+            loc = ""
+        else:
+            q = try_int(rec.get("quantità", 0))
+            loc = str(rec.get("location", "") or "").strip()
+        if q > max_qty:
+            max_qty = q
+            max_loc = loc
 
-    # produce list sorted by qty desc (primary location first)
-    locs = sorted([(loc, qty) for loc, qty in loc_map.items()], key=lambda x: x[1], reverse=True)
-    total = sum(loc_map.values())
-    return locs, total
+    if max_loc is None:
+        return [], 0
+    return [(max_loc, max_qty)], max_qty
 
 def deep_copy_stock(s):
     return copy.deepcopy(s)
@@ -334,9 +336,9 @@ elif page == "Analisi Richieste & Suggerimenti":
             alert_rows = []
             for item, tot_req in agg.items():
                 key = norma_item(item)
-                locs_mano, total_mano = get_locations_and_total(stock_in_mano, key)
+                locs_mano, main_mano_qty = get_locations_and_total(stock_in_mano, key)
                 loc_mano_display = locs_mano[0][0] if locs_mano else "non definita"
-                q_mano = total_mano
+                q_mano = main_mano_qty
                 if q_mano < soglia:
                     reserve_locs = []
                     val = stock_in_riserva.get(key, [])
@@ -473,7 +475,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                         label="📥 Scarica report ordine (Excel)",
                         data=buf.getvalue(),
                         file_name=f"verifica_{ordine_sel}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet"
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                 else:
                     st.info("Nessun articolo trovato per questo ordine.")
@@ -608,7 +610,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 st.session_state["confirm_prompt"] = {"type": None, "order": None}
                                 st.info("Annullamento prelievo cancellato dall'utente.")
 
-# ---------------- Sidebar: Ricerca Rapida (Totale + location principale) ----------------
+# ---------------- Sidebar: Ricerca Rapida (Location principale) ----------------
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔎 Ricerca Rapida")
 
@@ -617,19 +619,19 @@ if query_item:
     q = norma_item(query_item)
     found = False
 
-    locs_mano, total_mano = get_locations_and_total(stock_in_mano, q)
+    locs_mano, main_mano_qty = get_locations_and_total(stock_in_mano, q)
     if locs_mano:
         primary_loc_mano = locs_mano[0][0] or "Location non specificata"
-        st.sidebar.success(f"[In Mano] Totale: {total_mano} @ {primary_loc_mano}")
+        st.sidebar.success(f"[In Mano] Quantità principale: {main_mano_qty} @ {primary_loc_mano}")
         found = True
     else:
         st.sidebar.info("Nessuna presenza in mano.")
 
-    locs_ris, total_ris = get_locations_and_total(stock_in_riserva, q)
+    locs_ris, main_ris_qty = get_locations_and_total(stock_in_riserva, q)
     if locs_ris:
         primary_loc_ris = locs_ris[0][0] or "Location non specificata"
         note = " <-- INVENTORY" if "inventory" in str(primary_loc_ris).lower() else ""
-        st.sidebar.info(f"[In Riserva] Totale: {total_ris} @ {primary_loc_ris}{note}")
+        st.sidebar.info(f"[In Riserva] Quantità principale: {main_ris_qty} @ {primary_loc_ris}{note}")
         found = True
     else:
         st.sidebar.info("Nessuna presenza in riserva.")
