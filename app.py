@@ -1,4 +1,4 @@
-# app.py - RAD-TEST (con conferma modale per conferma/annulla prelievo)
+# app.py - RAD-TEST (con ricerca rapida migliorata: dettagli per-location + totali)
 import streamlit as st
 import pandas as pd
 import pickle
@@ -67,11 +67,48 @@ def try_int(v):
     try:
         return int(v)
     except Exception:
-        return 0
+        try:
+            return int(float(v))
+        except Exception:
+            return 0
 
 def deep_copy_stock(s):
     import copy
     return copy.deepcopy(s)
+
+# helper to extract per-location entries and total qty from a stock dict for a given key
+def get_locations_and_total(stock_dict, key):
+    """
+    stock_dict: mapping key -> either dict (single entry) or list of dicts [{'quantità':..,'location':..}, ...]
+    key: normalized item key (uppercase, trimmed)
+    Returns: (list_of_tuples [(location, qty), ...], total_qty)
+    """
+    entries = stock_dict.get(key)
+    locs = []
+    total = 0
+    if entries is None:
+        return locs, total
+    if isinstance(entries, dict):
+        loc = entries.get("location", "") or ""
+        q = try_int(entries.get("quantità", 0))
+        locs.append((loc, q))
+        total += q
+    elif isinstance(entries, (list, tuple)):
+        for rec in entries:
+            if isinstance(rec, dict):
+                loc = rec.get("location", "") or ""
+                q = try_int(rec.get("quantità", 0))
+                locs.append((loc, q))
+                total += q
+    else:
+        # fallback if stored as a simple number
+        try:
+            q = try_int(entries)
+            locs.append(("", q))
+            total += q
+        except Exception:
+            pass
+    return locs, total
 
 # ---------------- Load persistent data ----------------
 richiesta = carica_csv_safe(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL])
@@ -120,6 +157,7 @@ if page == "Carica Stock In Mano":
     if up:
         df = pd.read_excel(up)
         st.write("Colonne trovate:", df.columns.tolist())
+        # try rename common columns
         rename = {}
         for c in df.columns:
             lc = c.strip().lower()
@@ -556,17 +594,17 @@ elif page == "Analisi Richieste & Suggerimenti":
 
                 # UNDO LOGIC
                 with col2:
-                    # Undo is enabled only if confirm has been done (disabled flag = True)
                     undo_disabled = not st.session_state["confirm_disabled_for_order"].get(ordine_key, False)
                     if st.button("↩️ Annulla prelievo", disabled=undo_disabled, key=f"undo_btn_{ordine_key}"):
                         st.session_state["confirm_prompt"] = {"type": "undo", "order": ordine_key}
 
                     if st.session_state["confirm_prompt"].get("type") == "undo" and st.session_state["confirm_prompt"].get("order") == ordine_key:
                         st.warning("Sei sicuro di voler **annullare** l'ultimo prelievo per questo ordine? Verranno ripristinate le quantità salvate nel backup.")
-                        # show what will be restored (summary)
                         backup = st.session_state["pre_pick_backup"].get(ordine_key)
                         if backup:
                             st.write("Backup esistente — verranno ripristinati gli stock precedenti all'operazione.")
+                            # show a brief summary of what will be restored (optional)
+                            # (we keep it short to avoid clutter)
                         else:
                             st.write("Attenzione: nessun backup trovato; impossibile annullare.")
                         ccol2, dcol2 = st.columns([1,1])
@@ -590,44 +628,45 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 st.session_state["confirm_prompt"] = {"type": None, "order": None}
                                 st.info("Annullamento prelievo cancellato dall'utente.")
 
-# ---------------- Sidebar: Ricerca Item & Location ----------------
+# ---------------- Sidebar: Ricerca Item & Location (AGGIORNATA) ----------------
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔎 Ricerca Rapida")
 
-# search by Item Code
+# search by Item Code - enhanced: show per-location and totals
 query_item = st.sidebar.text_input("Cerca per Item Code")
 if query_item:
-    q = norma_item(query_item)
-    found = False
-    if q in stock_in_mano:
-        rec = stock_in_mano[q]
-        if isinstance(rec, dict):
-            st.sidebar.success(f"[In Mano] {rec.get('quantità',0)} @ {rec.get('location','')}")
-        elif isinstance(rec, (list,tuple)):
-            lines = []
-            for r in rec:
-                if isinstance(r, dict):
-                    lines.append(f"{r.get('location','')}: {r.get('quantità',0)}")
-            st.sidebar.success("[In Mano]\n" + "\n".join(lines))
-        found = True
-    if q in stock_in_riserva:
-        rec = stock_in_riserva[q]
-        if isinstance(rec, dict):
-            st.sidebar.info(f"[In Riserva] {rec.get('quantità',0)} @ {rec.get('location','')}")
-        elif isinstance(rec, (list,tuple)):
-            lines = []
-            for r in rec:
-                if isinstance(r, dict):
-                    s = f"{r.get('location','')}: {r.get('quantità',0)}"
-                    if "inventory" in str(r.get('location','')).lower():
-                        s += "  <-- INVENTORY"
-                    lines.append(s)
-            st.sidebar.info("[In Riserva]\n" + "\n".join(lines))
-        found = True
-    if not found:
+    search_key = norma_item(query_item)
+    found_any = False
+
+    st.sidebar.markdown(f"**Risultati per:** `{search_key}`")
+
+    # In Mano
+    locs_mano, total_mano = get_locations_and_total(stock_in_mano, search_key)
+    if locs_mano:
+        st.sidebar.markdown("**📦 In Mano:**")
+        for loc, q in locs_mano:
+            st.sidebar.write(f"- {loc or 'Location non specificata'}: {q}")
+        st.sidebar.markdown(f"**Totale In Mano:** {total_mano}")
+        found_any = True
+    else:
+        st.sidebar.info("Nessuna presenza in mano.")
+
+    # In Riserva
+    locs_ris, total_ris = get_locations_and_total(stock_in_riserva, search_key)
+    if locs_ris:
+        st.sidebar.markdown("**🏷️ In Riserva:**")
+        for loc, q in locs_ris:
+            note = " (INVENTORY)" if "inventory" in str(loc).lower() else ""
+            st.sidebar.write(f"- {loc or 'Location non specificata'}: {q}{note}")
+        st.sidebar.markdown(f"**Totale In Riserva:** {total_ris}")
+        found_any = True
+    else:
+        st.sidebar.info("Nessuna presenza in riserva.")
+
+    if not found_any:
         st.sidebar.warning("Item non trovato in nessuno stock.")
 
-# filter by Location
+# filter by Location - enhanced: show quantities total per item for selected location
 st.sidebar.markdown("### 📍 Filtra per Location")
 all_locations = set()
 for d in (stock_in_mano, stock_in_riserva):
@@ -636,7 +675,7 @@ for d in (stock_in_mano, stock_in_riserva):
             loc = v.get("location", "")
             if loc:
                 all_locations.add(loc)
-        elif isinstance(v, (list,tuple)):
+        elif isinstance(v, (list, tuple)):
             for rec in v:
                 if isinstance(rec, dict):
                     loc = rec.get("location","")
@@ -648,18 +687,19 @@ if all_locations:
     if sel_loc:
         st.sidebar.markdown(f"**Item in '{sel_loc}':**")
         for label, d in [("In Mano", stock_in_mano), ("In Riserva", stock_in_riserva)]:
-            items_here = {k:v for k,v in d.items() if (
-                (isinstance(v, dict) and v.get("location","")==sel_loc) or
-                (isinstance(v, (list,tuple)) and any((isinstance(r, dict) and r.get("location","")==sel_loc) for r in v))
-            )}
+            # build mapping item -> total qty in this location
+            items_here = {}
+            for item_code, rec in d.items():
+                if isinstance(rec, dict):
+                    if rec.get("location","") == sel_loc:
+                        items_here[item_code] = items_here.get(item_code, 0) + try_int(rec.get("quantità",0))
+                elif isinstance(rec, (list, tuple)):
+                    for r in rec:
+                        if isinstance(r, dict) and r.get("location","") == sel_loc:
+                            items_here[item_code] = items_here.get(item_code, 0) + try_int(r.get("quantità",0))
             if items_here:
                 st.sidebar.write(f"**{label}:**")
-                for item_code, rec in items_here.items():
-                    if isinstance(rec, dict):
-                        st.sidebar.write(f"- {item_code} → {rec.get('quantità',0)}")
-                    else:
-                        for r in rec:
-                            if isinstance(r, dict) and r.get("location","")==sel_loc:
-                                st.sidebar.write(f"- {item_code} → {r.get('quantità',0)}")
+                for item_code, qty in items_here.items():
+                    st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
