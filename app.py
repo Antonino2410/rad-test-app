@@ -1,4 +1,4 @@
-# app.py - RAD-TEST (versione corretta: somma totale affidabile per tutti gli item)
+# app.py - RAD-TEST (versione corretta: somma per location affidabile)
 import re
 import streamlit as st
 import pandas as pd
@@ -132,17 +132,18 @@ def ensure_list_entry(v):
     except Exception:
         return []
 
-# ----------- FIXED get_locations_and_total -----------
+# ----------- FIXED get_locations_and_total (aggregazione per location) -----------
 def get_locations_and_total(stock_dict, key):
     """
     Restituisce (list_of_tuples [(location, qty), ...], total_qty).
-    Fa robusta normalizzazione: accetta dict, list, valori singoli.
+    Aggrega le quantità **per singola location** (normalizzando location con strip)
+    e restituisce la lista ordinata per quantità decrescente (location principale prima).
     """
     entries = stock_dict.get(key)
     if entries is None:
         return [], 0
 
-    # Normalize entries to a list of dicts
+    # Normalize entries to a list
     if isinstance(entries, dict):
         entries_list = [entries]
     elif isinstance(entries, (list, tuple)):
@@ -152,20 +153,20 @@ def get_locations_and_total(stock_dict, key):
         q = try_int(entries)
         return [("", q)], q
 
-    locs = []
-    total = 0
+    # aggregate per location (normalized)
+    loc_map = {}
     for rec in entries_list:
         if not isinstance(rec, dict):
-            # try to interpret simple numeric entry
             q = try_int(rec)
-            locs.append(("", q))
-            total += q
+            loc_map[""] = loc_map.get("", 0) + q
             continue
         loc = str(rec.get("location", "") or "").strip()
         q = try_int(rec.get("quantità", 0))
-        locs.append((loc, q))
-        total += q
+        loc_map[loc] = loc_map.get(loc, 0) + q
 
+    # produce list sorted by qty desc (primary location first)
+    locs = sorted([(loc, qty) for loc, qty in loc_map.items()], key=lambda x: x[1], reverse=True)
+    total = sum(loc_map.values())
     return locs, total
 
 def deep_copy_stock(s):
@@ -472,7 +473,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                         label="📥 Scarica report ordine (Excel)",
                         data=buf.getvalue(),
                         file_name=f"verifica_{ordine_sel}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        mime="application/vnd.openxmlformats-officedocument-spreadsheetml.sheet"
                     )
                 else:
                     st.info("Nessun articolo trovato per questo ordine.")
