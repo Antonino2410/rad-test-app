@@ -1,4 +1,5 @@
-# app.py - RAD-TEST (aggiornato: aggregazione totale per tutti gli item)
+# app.py - RAD-TEST (versione completa aggiornata)
+import re
 import streamlit as st
 import pandas as pd
 import pickle
@@ -58,36 +59,79 @@ def carica_csv_safe(path, cols):
 def salva_csv(path, df):
     df.to_csv(path, index=False)
 
-# ---------------- Normalization & small helpers ----------------
+# ---------------- Normalization & robust parsing ----------------
 def norma_item(x):
+    """Normalizza Item Code: gestisce int/float/str e rimuove .0 finali."""
     if pd.isna(x):
         return ""
-    return str(x).strip().upper()
+    # numeri interi
+    if isinstance(x, int):
+        return str(x)
+    # float che rappresentano numeri interi come 100012431.0
+    if isinstance(x, float):
+        if x.is_integer():
+            return str(int(x))
+        return repr(x)
+    s = str(x).strip()
+    # rimuovi caratteri invisibili
+    s = s.replace('\u200b', '').strip()
+    # se pattern come "12345.0" trasformalo in "12345"
+    if re.match(r'^\d+\.0+$', s):
+        s = s.split('.')[0]
+    return s.upper()
 
 def try_int(v):
+    """Parsing robusto di quantità: gestisce int/float/string con separatori."""
+    if v is None:
+        return 0
+    # direct numeric
     try:
-        return int(v)
+        if isinstance(v, int):
+            return int(v)
+        if isinstance(v, float):
+            return int(round(v))
     except Exception:
-        try:
-            return int(float(v))
-        except Exception:
+        pass
+    s = str(v).strip()
+    if s == "":
+        return 0
+    s = s.replace(" ", "").replace("'", "")
+    # both separators present
+    if "." in s and "," in s:
+        last_dot = s.rfind('.')
+        last_comma = s.rfind(',')
+        if last_dot > last_comma:
+            s = s.replace(',', '')
+        else:
+            s = s.replace('.', '').replace(',', '.')
+    else:
+        if "." in s and "," not in s:
+            parts = s.split('.')
+            if all(len(p) == 3 for p in parts[1:]):
+                s = s.replace('.', '')
+        if "," in s and "." not in s:
+            parts = s.split(',')
+            if all(len(p) == 3 for p in parts[1:]):
+                s = s.replace(',', '')
+            else:
+                s = s.replace(',', '.')
+    try:
+        f = float(s)
+        return int(round(f))
+    except Exception:
+        digits = re.sub(r'\D', '', s)
+        if digits == "":
             return 0
-
-def deep_copy_stock(s):
-    return copy.deepcopy(s)
+        return int(digits)
 
 def ensure_list_entry(v):
-    """
-    Normalize a loaded stock value to always be a list of dicts.
-    If v is dict -> return [v]; if list/tuple -> return list(v); else try to convert numeric -> [{'quantità': v, 'location': ''}]
-    """
+    """Normalizza il valore a lista di dict [{'quantità':..,'location':..}, ...]"""
     if v is None:
         return []
     if isinstance(v, dict):
         return [v]
     if isinstance(v, (list, tuple)):
         return list(v)
-    # fallback: single numeric
     try:
         q = try_int(v)
         return [{"quantità": q, "location": ""}]
@@ -96,14 +140,15 @@ def ensure_list_entry(v):
 
 def get_locations_and_total(stock_dict, key):
     """
-    Returns (list_of_tuples [(location, qty), ...], total_qty)
+    Restituisce (list_of_tuples [(location, qty), ...], total_qty).
+    key is already normalized.
     """
     entries = stock_dict.get(key)
+    if entries is None:
+        return [], 0
     locs = []
     total = 0
-    if entries is None:
-        return locs, total
-    # ensure iterable
+    # entries expected as list of dicts
     if isinstance(entries, dict):
         entries = [entries]
     if isinstance(entries, (list, tuple)):
@@ -115,12 +160,9 @@ def get_locations_and_total(stock_dict, key):
                 total += q
     else:
         # fallback numeric
-        try:
-            q = try_int(entries)
-            locs.append(("", q))
-            total += q
-        except Exception:
-            pass
+        q = try_int(entries)
+        locs.append(("", q))
+        total += q
     return locs, total
 
 # ---------------- Load persistent data ----------------
@@ -128,7 +170,6 @@ richiesta = carica_csv_safe(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, C
 stock_in_mano_raw = carica_pickle_safe(STOCK_MANO_FILE)
 stock_in_riserva_raw = carica_pickle_safe(STOCK_RISERVA_FILE)
 
-# Normalize stock keys and values (uppercase keys, lists of dicts as values)
 def normalize_stock(orig):
     out = {}
     if not isinstance(orig, dict):
@@ -141,7 +182,7 @@ def normalize_stock(orig):
 stock_in_mano = normalize_stock(stock_in_mano_raw)
 stock_in_riserva = normalize_stock(stock_in_riserva_raw)
 
-# ---------------- Session state default slots ----------------
+# ---------------- Session state ----------------
 if "pending_picks" not in st.session_state:
     st.session_state["pending_picks"] = []
 if "confirm_disabled_for_order" not in st.session_state:
@@ -191,10 +232,9 @@ if page == "Carica Stock In Mano":
                 q = try_int(r[COL_QUANTITA])
                 loc = str(r[COL_LOCATION]).strip()
                 existing = stock_in_mano.get(key, [])
-                # append entry
                 existing.append({"quantità": q, "location": loc})
                 stock_in_mano[key] = existing
-            # persist normalized
+            # persist normalized structure
             salva_pickle(STOCK_MANO_FILE, stock_in_mano)
             st.success("Stock in mano salvato e aggregato correttamente.")
         else:
@@ -489,7 +529,6 @@ elif page == "Analisi Richieste & Suggerimenti":
                                             used = min(available, left)
                                             remaining = available - used
                                             left -= used
-                                            # update r
                                             r["quantità"] = max(0, remaining)
                                             newlist.append(r)
                                         stock_in_mano[item] = newlist
@@ -581,44 +620,38 @@ elif page == "Analisi Richieste & Suggerimenti":
                                 st.session_state["confirm_prompt"] = {"type": None, "order": None}
                                 st.info("Annullamento prelievo cancellato dall'utente.")
 
-# ---------------- Sidebar: Ricerca Item & Location (AGGIORNATA) ----------------
+# ---------------- Sidebar: Ricerca Item & Location (Totale + location principale) ----------------
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔎 Ricerca Rapida")
 
 query_item = st.sidebar.text_input("Cerca per Item Code")
 if query_item:
-    search_key = norma_item(query_item)
-    found_any = False
+    q = norma_item(query_item)
+    found = False
 
-    st.sidebar.markdown(f"**Risultati per:** `{search_key}`")
-
-    # In Mano
-    locs_mano, total_mano = get_locations_and_total(stock_in_mano, search_key)
+    # In Mano -> totale + prima location trovata
+    locs_mano, total_mano = get_locations_and_total(stock_in_mano, q)
     if locs_mano:
-        st.sidebar.markdown("**📦 In Mano:**")
-        for loc, q in locs_mano:
-            st.sidebar.write(f"- {loc or 'Location non specificata'}: {q}")
-        st.sidebar.markdown(f"**Totale In Mano:** {total_mano}")
-        found_any = True
+        primary_loc_mano = locs_mano[0][0] or "Location non specificata"
+        st.sidebar.success(f"[In Mano] Totale: {total_mano} @ {primary_loc_mano}")
+        found = True
     else:
         st.sidebar.info("Nessuna presenza in mano.")
 
-    # In Riserva
-    locs_ris, total_ris = get_locations_and_total(stock_in_riserva, search_key)
+    # In Riserva -> totale + prima location (mostra INVENTORY se presente)
+    locs_ris, total_ris = get_locations_and_total(stock_in_riserva, q)
     if locs_ris:
-        st.sidebar.markdown("**🏷️ In Riserva:**")
-        for loc, q in locs_ris:
-            note = " (INVENTORY)" if "inventory" in str(loc).lower() else ""
-            st.sidebar.write(f"- {loc or 'Location non specificata'}: {q}{note}")
-        st.sidebar.markdown(f"**Totale In Riserva:** {total_ris}")
-        found_any = True
+        primary_loc_ris = locs_ris[0][0] or "Location non specificata"
+        note = " <-- INVENTORY" if "inventory" in str(primary_loc_ris).lower() else ""
+        st.sidebar.info(f"[In Riserva] Totale: {total_ris} @ {primary_loc_ris}{note}")
+        found = True
     else:
         st.sidebar.info("Nessuna presenza in riserva.")
 
-    if not found_any:
+    if not found:
         st.sidebar.warning("Item non trovato in nessuno stock.")
 
-# filter by Location - enhanced: show quantities total per item for selected location
+# ---------------- Sidebar: Filtra per Location ----------------
 st.sidebar.markdown("### 📍 Filtra per Location")
 all_locations = set()
 for d in (stock_in_mano, stock_in_riserva):
