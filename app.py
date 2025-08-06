@@ -1,82 +1,82 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Gestione Ordini", layout="wide")
+st.set_page_config(layout="wide")
+st.title("📦 Analisi Ordini & Disponibilità Magazzino")
 
-st.title("📦 Analisi Disponibilità Ordini")
+# Caricamento file stock in mano
+stock_mano_file = st.file_uploader("📄 Carica file Stock in Mano", type=["xlsx"], key="stock_mano")
+# Caricamento file stock di riserva
+stock_riserva_file = st.file_uploader("📄 Carica file Stock di Riserva", type=["xlsx"], key="stock_riserva")
+# Caricamento file richieste ordini
+ordini_file = st.file_uploader("📄 Carica file Analisi Ordini", type=["xlsx"], key="ordini")
 
-# Caricamento file
-stock_file = st.file_uploader("📥 Carica file Stock In Mano", type=["xlsx"])
-riserva_file = st.file_uploader("📥 Carica file Stock Riserva", type=["xlsx"])
-ordini_file = st.file_uploader("📥 Carica file Ordini", type=["xlsx"])
-
-if stock_file and riserva_file and ordini_file:
-    # Caricamento e normalizzazione colonne
-    stock_df = pd.read_excel(stock_file)
-    riserva_df = pd.read_excel(riserva_file)
+# Controllo caricamento file
+if stock_mano_file and stock_riserva_file and ordini_file:
+    stock_mano_df = pd.read_excel(stock_mano_file)
+    stock_riserva_df = pd.read_excel(stock_riserva_file)
     ordini_df = pd.read_excel(ordini_file)
 
-    # Pulizia nomi colonne per evitare KeyError
-    stock_df.columns = stock_df.columns.str.strip().str.lower()
-    riserva_df.columns = riserva_df.columns.str.strip().str.lower()
+    # Uniforma nomi colonne
+    stock_mano_df.columns = stock_mano_df.columns.str.strip().str.lower()
+    stock_riserva_df.columns = stock_riserva_df.columns.str.strip().str.lower()
     ordini_df.columns = ordini_df.columns.str.strip().str.lower()
 
-    # Campo da usare
-    col_item = "item code"
-    col_qty = "quantità"
-    col_order = "order number"
-    col_location = "location"
+    # Rinomina colonne chiave
+    stock_mano_df = stock_mano_df.rename(columns={"item code": "item_code", "quantità": "quantity", "location": "location"})
+    stock_riserva_df = stock_riserva_df.rename(columns={"item code": "item_code", "quantità": "quantity", "location": "location"})
+    ordini_df = ordini_df.rename(columns={"item code": "item_code", "requested_quantity": "requested_quantity", "order number": "order_number"})
 
-    st.subheader("🔍 Verifica Ordine")
-    ordine_selezionato = st.selectbox("Seleziona Order Number", ordini_df[col_order].unique())
+    st.subheader("📊 Risultato Analisi Ordini")
 
-    if ordine_selezionato:
-        # Filtra le righe dell'ordine selezionato
-        ordine_df = ordini_df[ordini_df[col_order] == ordine_selezionato]
-        risultati = []
+    risultati = []
 
-        for _, riga in ordine_df.iterrows():
-            item = riga[col_item]
-            richiesto = riga["requested quantity"]
+    for index, riga in ordini_df.iterrows():
+        item = str(riga["item_code"]).strip()
+        qty_richiesta = int(riga["requested_quantity"])
+        order = riga["order_number"]
 
-            # Calcolo disponibilità reale in mano
-            in_mano_df = stock_df[stock_df[col_item] == item]
-            disponibilità = in_mano_df[col_qty].sum()
+        # Quantità disponibile nello stock in mano
+        disponibile = stock_mano_df[stock_mano_df["item_code"] == item]["quantity"].sum()
 
-            if disponibilità >= richiesto:
-                risultati.append({
-                    "Item": item,
-                    "Richiesto": richiesto,
-                    "Disponibile In Mano": disponibilità,
-                    "Prelievo Riserva": "Non necessario"
-                })
+        risultato = {
+            "Order Number": order,
+            "Item Code": item,
+            "Requested Quantity": qty_richiesta,
+            "Disponibile in Mano": disponibile
+        }
+
+        if disponibile >= qty_richiesta:
+            risultato["Stato"] = "✅ Quantità disponibile"
+            risultato["Suggerimento"] = "-"
+        else:
+            mancante = qty_richiesta - disponibile
+            risultato["Stato"] = f"⚠️ Mancano {mancante} pezzi"
+            # Ricerca nello stock riserva solo nelle location contenenti "inventory"
+            riserva_item = stock_riserva_df[
+                (stock_riserva_df["item_code"] == item) &
+                (stock_riserva_df["location"].str.lower().str.contains("inventory"))
+            ]
+            suggerimenti = []
+            totale_riserva = 0
+
+            for _, riga_riserva in riserva_item.iterrows():
+                if totale_riserva >= mancante:
+                    break
+                preleva = min(mancante - totale_riserva, riga_riserva["quantity"])
+                totale_riserva += preleva
+                suggerimenti.append(f'{riga_riserva["location"]}: {preleva}')
+
+            if suggerimenti:
+                risultato["Suggerimento"] = " → ".join(sugerimenti)
             else:
-                mancante = richiesto - disponibilità
-                # Trova da stock di riserva dove c'è disponibilità per l'item
-                riserva_match = riserva_df[(riserva_df[col_item] == item) & 
-                                           (riserva_df[col_location].str.lower().str.contains("inventory"))]
+                risultato["Suggerimento"] = "❌ Nessuna quantità sufficiente in riserva"
 
-                suggerimenti = []
-                for _, entry in riserva_match.iterrows():
-                    q = entry[col_qty]
-                    loc = entry[col_location]
-                    if mancante <= 0:
-                        break
-                    da_prendere = min(mancante, q)
-                    suggerimenti.append(f"{da_prendere} da {loc}")
-                    mancante -= da_prendere
+        risultati.append(risultato)
 
-                suggerimento_finale = ", ".join(suggerimenti) if suggerimenti else "Non disponibile in riserva"
+    risultati_df = pd.DataFrame(risultati)
 
-                risultati.append({
-                    "Item": item,
-                    "Richiesto": richiesto,
-                    "Disponibile In Mano": disponibilità,
-                    "Prelievo Riserva": suggerimento_finale
-                })
-
-        risultati_df = pd.DataFrame(risultati)
-        st.dataframe(risultati_df, use_container_width=True)
+    st.dataframe(risultati_df, use_container_width=True)
 
 else:
-    st.info("📄 Carica tutti e tre i file per iniziare l'analisi.")
+    st.warning("📂 Carica tutti e tre i file per iniziare l’analisi.")
