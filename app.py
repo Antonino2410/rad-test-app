@@ -1,4 +1,4 @@
-# app.py - RAD-TEST (versione completa con fix per Requested_quantity)
+# app.py - RAD-TEST (versione finale: fix duplicate orders + normalizzazione Requested_quantity)
 import re
 import streamlit as st
 import pandas as pd
@@ -68,7 +68,7 @@ def salva_csv(path, df):
 
 # ---------------- Normalization & robust parsing ----------------
 def norma_item(x):
-    """Normalizza Item Code."""
+    """Normalizza Item Code: gestisce int/float/str e rimuove .0 finali."""
     if pd.isna(x):
         return ""
     if isinstance(x, int):
@@ -79,12 +79,14 @@ def norma_item(x):
         return repr(x)
     s = str(x).strip()
     s = s.replace('\u200b', '').strip()
-    if re.match(r'^\d+\.0+$', s):
-        s = s.split('.')[0]
+    # rimuovi eventuali .0 finali come "100012431.0"
+    m = re.match(r'^(\d+)\.0+$', s)
+    if m:
+        s = m.group(1)
     return s.upper()
 
 def try_int(v):
-    """Parsing robusto di quantità (int)."""
+    """Parsing robusto di quantità: gestisce int/float/string con separatori."""
     if v is None:
         return 0
     try:
@@ -97,7 +99,9 @@ def try_int(v):
     s = str(v).strip()
     if s == "":
         return 0
+    # rimuovi spazi e apostrofi
     s = s.replace(" ", "").replace("'", "")
+    # gestione numeri con punti e virgole come separatori di migliaia/decimali
     if "." in s and "," in s:
         last_dot = s.rfind('.')
         last_comma = s.rfind(',')
@@ -106,13 +110,14 @@ def try_int(v):
         else:
             s = s.replace('.', '').replace(',', '.')
     else:
+        # se ha punti con gruppi di 3 considerali separatori migliaia
         if "." in s and "," not in s:
             parts = s.split('.')
-            if all(len(p) == 3 for p in parts[1:]):
+            if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
                 s = s.replace('.', '')
         if "," in s and "." not in s:
             parts = s.split(',')
-            if all(len(p) == 3 for p in parts[1:]):
+            if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
                 s = s.replace(',', '')
             else:
                 s = s.replace(',', '.')
@@ -126,7 +131,7 @@ def try_int(v):
         return int(digits)
 
 def ensure_list_entry(v):
-    """Ensure list of dicts for stock entries."""
+    """Normalizza il valore a lista di dict [{'quantità':..,'location':..}, ...]"""
     if v is None:
         return []
     if isinstance(v, dict):
@@ -143,7 +148,7 @@ def ensure_list_entry(v):
 def get_locations_and_total(stock_dict, key):
     """
     Restituisce (list_of_tuples [(location, qty)], main_qty).
-    Qui prendiamo LA location principale: la riga con quantità maggiore.
+    Prendiamo LA location principale: la riga con quantità maggiore.
     """
     entries = stock_dict.get(key)
     if entries is None:
@@ -288,49 +293,76 @@ elif page == "Carica Stock Riserva":
 elif page == "Analisi Richieste & Suggerimenti":
     st.title("📊 Analisi Richieste & Suggerimenti")
 
+    # ---------- FILE UPLOAD RICHIESTE (con normalizzazione e SOSTITUZIONE ordini esistenti) ----------
     up = st.file_uploader("Carica file Excel richieste (Item Code, Requested_quantity, Order Number)", type=["xlsx", "xls"])
     if up:
         df = pd.read_excel(up)
-        st.write("Colonne trovate:", df.columns.tolist())
+        st.write("Colonne trovate nel file caricato:", df.columns.tolist())
+
+        # mappatura nomi colonne
         rename = {}
         for c in df.columns:
             lc = c.strip().lower()
             if lc in ["item code", "itemcode", "item number", "item_number", "item"]:
                 rename[c] = COL_ITEM_CODE
-            if lc in ["requested quantity", "requested_quantity", "requestedquantity", "quantità richiesta", "quantita richiesta"]:
+            if lc in ["requested quantity", "requested_quantity", "requestedquantity", "quantità richiesta", "quantita richiesta", "requested_quant", "requested_quantit"]:
                 rename[c] = COL_QTA_RICHIESTA
             if lc in ["order number", "ordernumber", "order"]:
                 rename[c] = COL_ORDER
         if rename:
             df.rename(columns=rename, inplace=True)
 
-        # Normalizza item code e requested quantity
+        # normalizza Item Code e Requested_quantity
         if COL_ITEM_CODE in df.columns:
             df[COL_ITEM_CODE] = df[COL_ITEM_CODE].apply(norma_item)
         if COL_QTA_RICHIESTA in df.columns:
             df[COL_QTA_RICHIESTA] = df[COL_QTA_RICHIESTA].apply(try_int)
-        if COL_ORDER not in df.columns:
-            df[COL_ORDER] = pd.NA
+        else:
+            st.error(f"Colonna '{COL_QTA_RICHIESTA}' non trovata nel file; assicurati esista.")
+            df = None
 
-        # Aggrega duplicati nello stesso file per (Order Number, Item Code)
-        if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
+        if df is not None:
+            # assicurati che ci sia colonna order
+            if COL_ORDER not in df.columns:
+                df[COL_ORDER] = pd.NA
+
+            # Aggrega duplicati *all'interno del file caricato* (Order + Item)
             df_grouped = df.groupby([COL_ORDER, COL_ITEM_CODE], as_index=False)[COL_QTA_RICHIESTA].sum()
             df_grouped[TS_COL] = pd.Timestamp.now()
+
+            # Debug (mostra i totali dell'upload) - puoi rimuovere queste due righe dopo test
+            st.write("Riepilogo upload per Order (somma Requested_quantity nel file caricato):")
+            st.write(df_grouped.groupby(COL_ORDER)[COL_QTA_RICHIESTA].sum())
+
+            # Evita duplicazioni nello storico: rimuovi dallo storico le righe con gli stessi Order Number 
+            # presenti nel file caricato (così il nuovo upload rimpiazza quello precedente per quegli ordini)
+            if COL_ORDER not in richiesta.columns:
+                richiesta[COL_ORDER] = pd.NA
+            orders_in_upload = [o for o in df_grouped[COL_ORDER].dropna().unique().tolist()]
+            if orders_in_upload:
+                richiesta = richiesta[~richiesta[COL_ORDER].isin(orders_in_upload)]
+
+            # Ora concateno il file raggruppato (che sostituisce eventuali precedenti per gli stessi ordini)
             df_to_add = df_grouped[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL]]
-            # garantisco tipo int per Requested
             df_to_add[COL_QTA_RICHIESTA] = df_to_add[COL_QTA_RICHIESTA].apply(try_int)
 
             richiesta = pd.concat([richiesta, df_to_add], ignore_index=True, sort=False)
             salva_csv(RICHIESTE_FILE, richiesta)
-            st.success("Richieste aggiunte allo storico (normalizzate e aggregate).")
-        else:
-            st.error(f"File richieste deve contenere almeno '{COL_ITEM_CODE}' e '{COL_QTA_RICHIESTA}'.")
+            st.success("Richieste aggiunte allo storico (normalizzate, aggregate e sostituite per gli Order caricati).")
+
+            # Debug: mostra totali nello storico per gli order appena caricati (dopo append)
+            if orders_in_upload:
+                st.write("Totali nello storico per gli order appena caricati (dopo append):")
+                st.write(richiesta[richiesta[COL_ORDER].isin(orders_in_upload)]
+                         .groupby(COL_ORDER)[COL_QTA_RICHIESTA].sum())
+
+    # ---------- FINE UPLOAD RICHIESTE ----------
 
     if richiesta.empty:
         st.info("Nessuno storico richieste presente. Carica un file richieste.")
     else:
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
-        recenti = richiesta[richiesta[TS_COL] >= cutoff]
+        recenti = richiesta[richiesta[TS_COL] >= cutoff].copy()
         # Assicuriamoci che Requested_quantity sia numerico
         if COL_QTA_RICHIESTA in recenti.columns:
             recenti[COL_QTA_RICHIESTA] = recenti[COL_QTA_RICHIESTA].apply(try_int)
@@ -349,6 +381,7 @@ elif page == "Analisi Richieste & Suggerimenti":
         else:
             st.info("Nessun dato richieste recenti.")
 
+        # --- Alert stock basso (expander) ---
         with st.expander("⚠️ Alert stock basso"):
             alert_rows = []
             for item, tot_req in agg.items():
@@ -391,6 +424,7 @@ elif page == "Analisi Richieste & Suggerimenti":
             else:
                 st.success("Nessun alert: tutti gli stock in mano sono sopra la soglia.")
 
+        # ---------------- Verifica disponibilità per Order Number ----------------
         st.markdown("## 🔍 Verifica disponibilità per Order Number")
         order_list = richiesta[COL_ORDER].dropna().unique().tolist()
         if not order_list:
