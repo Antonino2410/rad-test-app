@@ -1,4 +1,4 @@
-# app.py - RAD-TEST (mostra la location principale: quantità massima, non la somma totale)
+# app.py - RAD-TEST (versione completa con fix per Requested_quantity)
 import re
 import streamlit as st
 import pandas as pd
@@ -46,11 +46,18 @@ def salva_pickle(path, data):
         pickle.dump(data, f)
 
 def carica_csv_safe(path, cols):
+    """
+    Carica lo storico delle richieste e normalizza Item Code e Requested_quantity se presenti.
+    """
     if os.path.exists(path):
         try:
             df = pd.read_csv(path)
             if TS_COL in df.columns:
                 df[TS_COL] = pd.to_datetime(df[TS_COL], errors="coerce")
+            if COL_ITEM_CODE in df.columns:
+                df[COL_ITEM_CODE] = df[COL_ITEM_CODE].apply(norma_item)
+            if COL_QTA_RICHIESTA in df.columns:
+                df[COL_QTA_RICHIESTA] = df[COL_QTA_RICHIESTA].apply(try_int)
             return df
         except Exception:
             return pd.DataFrame(columns=cols)
@@ -61,7 +68,7 @@ def salva_csv(path, df):
 
 # ---------------- Normalization & robust parsing ----------------
 def norma_item(x):
-    """Normalizza Item Code: gestisce int/float/str e rimuove .0 finali."""
+    """Normalizza Item Code."""
     if pd.isna(x):
         return ""
     if isinstance(x, int):
@@ -77,7 +84,7 @@ def norma_item(x):
     return s.upper()
 
 def try_int(v):
-    """Parsing robusto di quantità: gestisce int/float/string con separatori."""
+    """Parsing robusto di quantità (int)."""
     if v is None:
         return 0
     try:
@@ -91,7 +98,6 @@ def try_int(v):
     if s == "":
         return 0
     s = s.replace(" ", "").replace("'", "")
-    # gestione separatori
     if "." in s and "," in s:
         last_dot = s.rfind('.')
         last_comma = s.rfind(',')
@@ -120,7 +126,7 @@ def try_int(v):
         return int(digits)
 
 def ensure_list_entry(v):
-    """Normalizza il valore a lista di dict [{'quantità':..,'location':..}, ...]"""
+    """Ensure list of dicts for stock entries."""
     if v is None:
         return []
     if isinstance(v, dict):
@@ -137,15 +143,13 @@ def ensure_list_entry(v):
 def get_locations_and_total(stock_dict, key):
     """
     Restituisce (list_of_tuples [(location, qty)], main_qty).
-    Qui prendiamo LA location principale: la riga con quantità *maggiore*.
-    Restituiamo la lista con un solo elemento (location_principale, qty) se presente.
-    main_qty è la quantità di quella location.
+    Qui prendiamo LA location principale: la riga con quantità maggiore.
     """
     entries = stock_dict.get(key)
     if entries is None:
         return [], 0
 
-    # Normalize entries to list
+    # Normalize to list
     if isinstance(entries, dict):
         entries_list = [entries]
     elif isinstance(entries, (list, tuple)):
@@ -233,6 +237,7 @@ if page == "Carica Stock In Mano":
             df.rename(columns=rename, inplace=True)
 
         if COL_ITEM_CODE in df.columns and COL_QUANTITA in df.columns and COL_LOCATION in df.columns:
+            # aggregate same Item+Location within uploaded file
             grouped = df.groupby([COL_ITEM_CODE, COL_LOCATION])[COL_QUANTITA].sum().reset_index()
             for _, r in grouped.iterrows():
                 key = norma_item(r[COL_ITEM_CODE])
@@ -299,16 +304,25 @@ elif page == "Analisi Richieste & Suggerimenti":
         if rename:
             df.rename(columns=rename, inplace=True)
 
+        # Normalizza item code e requested quantity
         if COL_ITEM_CODE in df.columns:
             df[COL_ITEM_CODE] = df[COL_ITEM_CODE].apply(norma_item)
-        df[TS_COL] = pd.Timestamp.now()
+        if COL_QTA_RICHIESTA in df.columns:
+            df[COL_QTA_RICHIESTA] = df[COL_QTA_RICHIESTA].apply(try_int)
+        if COL_ORDER not in df.columns:
+            df[COL_ORDER] = pd.NA
 
+        # Aggrega duplicati nello stesso file per (Order Number, Item Code)
         if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
-            if COL_ORDER not in df.columns:
-                df[COL_ORDER] = pd.NA
-            richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL]]], ignore_index=True)
+            df_grouped = df.groupby([COL_ORDER, COL_ITEM_CODE], as_index=False)[COL_QTA_RICHIESTA].sum()
+            df_grouped[TS_COL] = pd.Timestamp.now()
+            df_to_add = df_grouped[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL]]
+            # garantisco tipo int per Requested
+            df_to_add[COL_QTA_RICHIESTA] = df_to_add[COL_QTA_RICHIESTA].apply(try_int)
+
+            richiesta = pd.concat([richiesta, df_to_add], ignore_index=True, sort=False)
             salva_csv(RICHIESTE_FILE, richiesta)
-            st.success("Richieste aggiunte allo storico.")
+            st.success("Richieste aggiunte allo storico (normalizzate e aggregate).")
         else:
             st.error(f"File richieste deve contenere almeno '{COL_ITEM_CODE}' e '{COL_QTA_RICHIESTA}'.")
 
@@ -317,6 +331,9 @@ elif page == "Analisi Richieste & Suggerimenti":
     else:
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
         recenti = richiesta[richiesta[TS_COL] >= cutoff]
+        # Assicuriamoci che Requested_quantity sia numerico
+        if COL_QTA_RICHIESTA in recenti.columns:
+            recenti[COL_QTA_RICHIESTA] = recenti[COL_QTA_RICHIESTA].apply(try_int)
         try:
             agg = recenti.groupby(COL_ITEM_CODE)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
         except Exception:
@@ -381,7 +398,10 @@ elif page == "Analisi Richieste & Suggerimenti":
         else:
             ordine_sel = st.selectbox("Seleziona Order Number", order_list)
             if st.button("Verifica ordine"):
-                filtro = richiesta[richiesta[COL_ORDER] == ordine_sel]
+                filtro = richiesta[richiesta[COL_ORDER] == ordine_sel].copy()
+                # forzo numericità
+                if COL_QTA_RICHIESTA in filtro.columns:
+                    filtro[COL_QTA_RICHIESTA] = filtro[COL_QTA_RICHIESTA].apply(try_int)
                 grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
 
                 rows = []
@@ -480,7 +500,7 @@ elif page == "Analisi Richieste & Suggerimenti":
                 else:
                     st.info("Nessun articolo trovato per questo ordine.")
 
-            # Confirm / Undo UI (same logic as before)
+            # Confirm / Undo UI
             if st.session_state.get("pending_picks"):
                 ordine_key = ordine_sel
                 confirmed_flag = st.session_state["confirm_disabled_for_order"].get(ordine_key, False)
