@@ -1,93 +1,82 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="RAD-TEST App", layout="wide")
-st.title("📦 RAD-TEST – Gestione Stock e Ordini")
+st.set_page_config(page_title="Gestione Ordini", layout="wide")
 
-# Inizializzazione session state
-if "stock_mano" not in st.session_state:
-    st.session_state["stock_mano"] = pd.DataFrame()
-if "stock_riserva" not in st.session_state:
-    st.session_state["stock_riserva"] = pd.DataFrame()
-if "ordini" not in st.session_state:
-    st.session_state["ordini"] = pd.DataFrame()
+st.title("📦 Analisi Disponibilità Ordini")
 
-# Upload file
-st.sidebar.header("📁 Carica i tuoi file Excel")
-stock_file = st.sidebar.file_uploader("📦 Stock in mano", type=["xlsx"])
-riserva_file = st.sidebar.file_uploader("📦 Stock di riserva", type=["xlsx"])
-ordini_file = st.sidebar.file_uploader("📄 Ordini (con Order Number)", type=["xlsx"])
+# Caricamento file
+stock_file = st.file_uploader("📥 Carica file Stock In Mano", type=["xlsx"])
+riserva_file = st.file_uploader("📥 Carica file Stock Riserva", type=["xlsx"])
+ordini_file = st.file_uploader("📥 Carica file Ordini", type=["xlsx"])
 
-if stock_file:
-    st.session_state["stock_mano"] = pd.read_excel(stock_file)
-if riserva_file:
-    st.session_state["stock_riserva"] = pd.read_excel(riserva_file)
-if ordini_file:
-    st.session_state["ordini"] = pd.read_excel(ordini_file)
+if stock_file and riserva_file and ordini_file:
+    # Caricamento e normalizzazione colonne
+    stock_df = pd.read_excel(stock_file)
+    riserva_df = pd.read_excel(riserva_file)
+    ordini_df = pd.read_excel(ordini_file)
 
-stock_df = st.session_state["stock_mano"]
-riserva_df = st.session_state["stock_riserva"]
-ordini_df = st.session_state["ordini"]
+    # Pulizia nomi colonne per evitare KeyError
+    stock_df.columns = stock_df.columns.str.strip().str.lower()
+    riserva_df.columns = riserva_df.columns.str.strip().str.lower()
+    ordini_df.columns = ordini_df.columns.str.strip().str.lower()
 
-# Analisi
-st.header("🔎 Analisi Disponibilità per Order Number")
+    # Campo da usare
+    col_item = "item code"
+    col_qty = "quantità"
+    col_order = "order number"
+    col_location = "location"
 
-if not stock_df.empty and not riserva_df.empty and not ordini_df.empty:
+    st.subheader("🔍 Verifica Ordine")
+    ordine_selezionato = st.selectbox("Seleziona Order Number", ordini_df[col_order].unique())
 
-    # Pulizia nomi colonne
-    ordini_df.columns = [col.strip() for col in ordini_df.columns]
-    stock_df.columns = [col.strip() for col in stock_df.columns]
-    riserva_df.columns = [col.strip() for col in riserva_df.columns]
+    if ordine_selezionato:
+        # Filtra le righe dell'ordine selezionato
+        ordine_df = ordini_df[ordini_df[col_order] == ordine_selezionato]
+        risultati = []
 
-    # Selezione Order Number
-    unique_orders = ordini_df["Order Number"].dropna().unique()
-    selected_order = st.selectbox("Seleziona un Order Number", unique_orders)
+        for _, riga in ordine_df.iterrows():
+            item = riga[col_item]
+            richiesto = riga["requested quantity"]
 
-    if selected_order:
-        ordine_corrente = ordini_df[ordini_df["Order Number"] == selected_order]
-        suggerimenti = []
+            # Calcolo disponibilità reale in mano
+            in_mano_df = stock_df[stock_df[col_item] == item]
+            disponibilità = in_mano_df[col_qty].sum()
 
-        for _, riga in ordine_corrente.iterrows():
-            item = str(riga["Item Code"]).strip()
-            richiesta = float(riga["Requested_quantity"])
-
-            # Quantità totale in mano
-            stock_totale = stock_df[stock_df["Item Code"] == item]["Quantity"].sum()
-
-            if stock_totale >= richiesta:
-                suggerimenti.append({
-                    "Item Code": item,
-                    "Richiesta": richiesta,
-                    "Disponibile in mano": stock_totale,
-                    "Status": "✅ Sufficiente in stock in mano",
-                    "Prelievi da riserva": ""
+            if disponibilità >= richiesto:
+                risultati.append({
+                    "Item": item,
+                    "Richiesto": richiesto,
+                    "Disponibile In Mano": disponibilità,
+                    "Prelievo Riserva": "Non necessario"
                 })
             else:
-                mancante = richiesta - stock_totale
-                suggeriti = []
-                riserva_item = riserva_df[
-                    (riserva_df["Item Code"] == item) &
-                    (riserva_df["Location"].str.lower().str.contains("inventory"))
-                ].sort_values("Quantity", ascending=False)
+                mancante = richiesto - disponibilità
+                # Trova da stock di riserva dove c'è disponibilità per l'item
+                riserva_match = riserva_df[(riserva_df[col_item] == item) & 
+                                           (riserva_df[col_location].str.lower().str.contains("inventory"))]
 
-                for _, loc in riserva_item.iterrows():
+                suggerimenti = []
+                for _, entry in riserva_match.iterrows():
+                    q = entry[col_qty]
+                    loc = entry[col_location]
                     if mancante <= 0:
                         break
-                    qty = loc["Quantity"]
-                    take = min(qty, mancante)
-                    suggeriti.append(f"{take} da {loc['Location']}")
-                    mancante -= take
+                    da_prendere = min(mancante, q)
+                    suggerimenti.append(f"{da_prendere} da {loc}")
+                    mancante -= da_prendere
 
-                suggerimenti.append({
-                    "Item Code": item,
-                    "Richiesta": richiesta,
-                    "Disponibile in mano": stock_totale,
-                    "Status": "⚠️ Parziale",
-                    "Prelievi da riserva": ", ".join(suggeriti) if suggeriti else "❌ Nessuna riserva trovata"
+                suggerimento_finale = ", ".join(suggerimenti) if suggerimenti else "Non disponibile in riserva"
+
+                risultati.append({
+                    "Item": item,
+                    "Richiesto": richiesto,
+                    "Disponibile In Mano": disponibilità,
+                    "Prelievo Riserva": suggerimento_finale
                 })
 
-        risultato = pd.DataFrame(suggerimenti)
-        st.dataframe(risultato, use_container_width=True)
+        risultati_df = pd.DataFrame(risultati)
+        st.dataframe(risultati_df, use_container_width=True)
 
 else:
-    st.info("Carica tutti e tre i file Excel per eseguire l'analisi.")
+    st.info("📄 Carica tutti e tre i file per iniziare l'analisi.")
