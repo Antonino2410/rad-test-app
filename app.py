@@ -141,30 +141,34 @@ def ensure_list_entry(v):
 def get_locations_and_total(stock_dict, key):
     """
     Restituisce (list_of_tuples [(location, qty), ...], total_qty).
-    key is already normalized.
+    key is già normalizzato.
     """
     entries = stock_dict.get(key)
-    if entries is None:
-        return [], 0
     locs = []
     total = 0
-    # entries expected as list of dicts
+
+    # Se None o non trovata
+    if entries is None:
+        return [], 0
+
+    # Assicurati che sia una lista
     if isinstance(entries, dict):
         entries = [entries]
-    if isinstance(entries, (list, tuple)):
-        for rec in entries:
-            if isinstance(rec, dict):
-                loc = rec.get("location", "") or ""
-                q = try_int(rec.get("quantità", 0))
-                locs.append((loc, q))
-                total += q
-    else:
-        # fallback numeric
+    elif not isinstance(entries, list):
+        # fallback su valore singolo
         q = try_int(entries)
-        locs.append(("", q))
-        total += q
-    return locs, total
+        return [("", q)], q
 
+    # Ora entries è una lista di dict
+    for rec in entries:
+        if isinstance(rec, dict):
+            loc = str(rec.get("location", "")).strip()
+            q = try_int(rec.get("quantità", 0))
+            locs.append((loc, q))
+            total += q
+
+    return locs, total
+    
 # ---------------- Load persistent data ----------------
 richiesta = carica_csv_safe(RICHIESTE_FILE, [COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL])
 stock_in_mano_raw = carica_pickle_safe(STOCK_MANO_FILE)
@@ -687,3 +691,4 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
+
