@@ -381,8 +381,14 @@ elif page == "Analisi Richieste & Suggerimenti":
         else:
             ordine_sel = st.selectbox("Seleziona Order Number", order_list)
             if st.button("Verifica ordine"):
-                filtro = richiesta[richiesta[COL_ORDER] == ordine_sel]
-                grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
+    filtro = richiesta[richiesta[COL_ORDER] == ordine_sel].copy()
+
+    # ✅ Conversione sicura delle quantità richieste in interi
+    filtro[COL_QTA_RICHIESTA] = filtro[COL_QTA_RICHIESTA].apply(try_int)
+
+    # 🔢 Raggruppamento corretto per Item Code
+    grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
+
 
                 rows = []
                 pending_allocations = []
@@ -675,3 +681,4 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
+
