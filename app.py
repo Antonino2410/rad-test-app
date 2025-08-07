@@ -389,6 +389,8 @@ elif page == "Analisi Richieste & Suggerimenti":
     # 🔢 Raggruppamento corretto per Item Code
     grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
 
+    
+
                 rows = []
                 pending_allocations = []
                 for _, r in grouped.iterrows():
@@ -680,5 +682,6 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
+
 
 
