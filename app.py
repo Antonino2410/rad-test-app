@@ -1,101 +1,94 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Gestione Stock", layout="wide")
-st.title("📦 Gestione Stock & Analisi Ordini")
+st.title("📦 Analisi Ordini e Magazzino")
 
-# Funzione per rinominare le colonne in modo intelligente
-def rinomina_colonne(df):
-    cols_lower = df.columns.str.strip().str.lower()
-    mapping = {}
-    for orig, lower in zip(df.columns, cols_lower):
-        if "item" in lower and "code" in lower:
-            mapping[orig] = "item_code"
-        elif "quant" in lower and "request" not in lower:
-            mapping[orig] = "quantity"
-        elif "loc" in lower:
-            mapping[orig] = "location"
-        elif "order" in lower and "number" in lower:
-            mapping[orig] = "order_number"
-        elif "request" in lower:
-            mapping[orig] = "requested_quantity"
-    return df.rename(columns=mapping)
+# Caricamento file
+stock_file = st.file_uploader("Carica il file dello Stock in Mano", type=["xlsx"])
+riserva_file = st.file_uploader("Carica il file dello Stock in Riserva", type=["xlsx"])
+richieste_file = st.file_uploader("Carica il file delle Richieste Ordine", type=["xlsx"])
 
-# Upload file
-st.sidebar.header("📁 Carica i file")
-
-file_stock_mano = st.sidebar.file_uploader("Stock in mano", type=["xlsx", "xls", "csv"])
-file_stock_riserva = st.sidebar.file_uploader("Stock in riserva", type=["xlsx", "xls", "csv"])
-file_ordini = st.sidebar.file_uploader("File ordini", type=["xlsx", "xls", "csv"])
-
-if file_stock_mano and file_stock_riserva and file_ordini:
+if stock_file and riserva_file and richieste_file:
     try:
-        stock_mano_df = pd.read_excel(file_stock_mano) if file_stock_mano.name.endswith(("xlsx", "xls")) else pd.read_csv(file_stock_mano)
-        stock_riserva_df = pd.read_excel(file_stock_riserva) if file_stock_riserva.name.endswith(("xlsx", "xls")) else pd.read_csv(file_stock_riserva)
-        ordini_df = pd.read_excel(file_ordini) if file_ordini.name.endswith(("xlsx", "xls")) else pd.read_csv(file_ordini)
+        # Caricamento dati
+        stock_df = pd.read_excel(stock_file)
+        riserva_df = pd.read_excel(riserva_file)
+        richieste_df = pd.read_excel(richieste_file)
 
-        # Rinomina colonne
-        stock_mano_df = rinomina_colonne(stock_mano_df)
-        stock_riserva_df = rinomina_colonne(stock_riserva_df)
-        ordini_df = rinomina_colonne(ordini_df)
+        # Pulizia colonne
+        stock_df.columns = stock_df.columns.str.strip().str.lower()
+        riserva_df.columns = riserva_df.columns.str.strip().str.lower()
+        richieste_df.columns = richieste_df.columns.str.strip().str.lower()
 
-        # Debug visivo
-        # st.write("Colonne stock_mano:", stock_mano_df.columns.tolist())
-        # st.write("Colonne stock_riserva:", stock_riserva_df.columns.tolist())
-        # st.write("Colonne ordini:", ordini_df.columns.tolist())
+        # Rinomina colonne se necessario
+        if "item code" in stock_df.columns:
+            stock_df.rename(columns={"item code": "item_code"}, inplace=True)
+        if "quantità" in stock_df.columns:
+            stock_df.rename(columns={"quantità": "quantità_in_mano"}, inplace=True)
 
-        risultati = []
+        if "item code" in riserva_df.columns:
+            riserva_df.rename(columns={"item code": "item_code"}, inplace=True)
+        if "quantità" in riserva_df.columns:
+            riserva_df.rename(columns={"quantità": "quantità_riserva"}, inplace=True)
 
-        for _, riga in ordini_df.iterrows():
-            item = riga["item_code"]
-            order_n = riga["order_number"]
-            richiesta = riga["requested_quantity"]
+        if "item code" in richieste_df.columns:
+            richieste_df.rename(columns={"item code": "item_code"}, inplace=True)
+        if "requested quantity" in richieste_df.columns:
+            richieste_df.rename(columns={"requested quantity": "requested_quantity"}, inplace=True)
 
-            stock_disponibile = stock_mano_df[stock_mano_df["item_code"] == item]["quantity"].sum()
+        # Somma quantità totali per item
+        stock_sum = stock_df.groupby("item_code")["quantità_in_mano"].sum().reset_index()
+        riserva_sum = riserva_df.groupby(["item_code", "location"])["quantità_riserva"].sum().reset_index()
 
-            if stock_disponibile >= richiesta:
-                risultati.append({
-                    "Order Number": order_n,
-                    "Item Code": item,
-                    "Quantità richiesta": richiesta,
-                    "Quantità disponibile (mano)": stock_disponibile,
-                    "Status": "✔️ Stock sufficiente",
-                    "Suggerimento": "-"
-                })
+        # Merge richieste con stock in mano
+        merged = pd.merge(richieste_df, stock_sum, on="item_code", how="left")
+
+        # Verifica disponibilità
+        merged["quantità_in_mano"] = merged["quantità_in_mano"].fillna(0)
+        merged["sufficiente_in_mano"] = merged["quantità_in_mano"] >= merged["requested_quantity"]
+
+        # Se insufficiente, suggerisci da dove prelevare
+        suggerimenti = []
+
+        for _, row in merged.iterrows():
+            item = row["item_code"]
+            richiesto = row["requested_quantity"]
+            disponibile = row["quantità_in_mano"]
+            ordine = row["order number"]
+
+            if disponibile >= richiesto:
+                suggerimenti.append("✔️ Quantità sufficiente in stock in mano")
             else:
-                mancante = richiesta - stock_disponibile
+                deficit = richiesto - disponibile
+                riserva_item = riserva_sum[riserva_sum["item_code"] == item]
+                riserva_item = riserva_item.sort_values("quantità_riserva", ascending=False)
 
-                riserva_righe = stock_riserva_df[stock_riserva_df["item_code"] == item]
-                riserva_righe = riserva_righe[riserva_righe["quantity"] > 0]
-
-                suggerimenti = []
-                for _, riga_r in riserva_righe.iterrows():
-                    loc = riga_r["location"]
-                    qta_loc = riga_r["quantity"]
-
-                    if mancante <= 0:
+                suggerito = ""
+                accumulato = 0
+                for _, ris in riserva_item.iterrows():
+                    if accumulato >= deficit:
                         break
+                    qta = ris["quantità_riserva"]
+                    loc = ris["location"]
+                    da_prel = min(qta, deficit - accumulato)
+                    suggerito += f"Recupera {da_prel} da {loc}. "
+                    accumulato += da_prel
 
-                    take = min(mancante, qta_loc)
-                    suggerimenti.append(f"{take} da {loc}")
-                    mancante -= take
+                if suggerito == "":
+                    suggerito = "❌ Quantità insufficiente anche in riserva"
+                suggerimenti.append(suggerito)
 
-                risultati.append({
-                    "Order Number": order_n,
-                    "Item Code": item,
-                    "Quantità richiesta": richiesta,
-                    "Quantità disponibile (mano)": stock_disponibile,
-                    "Status": "⚠️ Stock insufficiente",
-                    "Suggerimento": ", ".join(suggerimenti) if suggerimenti else "🔴 Nessuna riserva disponibile"
-                })
+        merged["suggerimento"] = suggerimenti
 
-        risultati_df = pd.DataFrame(risultati)
+        st.success("Analisi completata!")
+        st.write("### 📋 Risultato dell'analisi")
+        st.dataframe(merged[["order number", "item_code", "requested_quantity", "quantità_in_mano", "sufficiente_in_mano", "suggerimento"]])
 
-        st.subheader("📊 Analisi Ordini")
-        st.dataframe(risultati_df, use_container_width=True)
+        # Download risultato
+        csv = merged.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Scarica risultato in CSV", data=csv, file_name="analisi_magazzino.csv", mime="text/csv")
 
     except Exception as e:
         st.error(f"Errore nel caricamento o analisi dei dati: {e}")
-
 else:
-    st.warning("📌 Carica tutti e tre i file per iniziare l’analisi.")
+    st.info("Carica tutti e tre i file per eseguire l’analisi.")
