@@ -1,4 +1,3 @@
-# app.py - RAD-TEST (mostra la location principale: quantità massima, non la somma totale)
 import re
 import streamlit as st
 import pandas as pd
@@ -287,7 +286,6 @@ elif page == "Analisi Richieste & Suggerimenti":
     if up:
         df = pd.read_excel(up)
         st.write("Colonne trovate:", df.columns.tolist())
-
         rename = {}
         for c in df.columns:
             lc = c.strip().lower()
@@ -297,25 +295,17 @@ elif page == "Analisi Richieste & Suggerimenti":
                 rename[c] = COL_QTA_RICHIESTA
             if lc in ["order number", "ordernumber", "order"]:
                 rename[c] = COL_ORDER
-
         if rename:
             df.rename(columns=rename, inplace=True)
 
         if COL_ITEM_CODE in df.columns:
             df[COL_ITEM_CODE] = df[COL_ITEM_CODE].apply(norma_item)
-
         df[TS_COL] = pd.Timestamp.now()
 
         if COL_ITEM_CODE in df.columns and COL_QTA_RICHIESTA in df.columns:
             if COL_ORDER not in df.columns:
                 df[COL_ORDER] = pd.NA
-
-            df[COL_QTA_RICHIESTA] = df[COL_QTA_RICHIESTA].apply(try_int)
-
-            richiesta = pd.concat(
-                [richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL]]],
-                ignore_index=True
-            )
+            richiesta = pd.concat([richiesta, df[[COL_ITEM_CODE, COL_QTA_RICHIESTA, COL_ORDER, TS_COL]]], ignore_index=True)
             salva_csv(RICHIESTE_FILE, richiesta)
             st.success("Richieste aggiunte allo storico.")
         else:
@@ -326,35 +316,73 @@ elif page == "Analisi Richieste & Suggerimenti":
     else:
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
         recenti = richiesta[richiesta[TS_COL] >= cutoff]
-
         try:
             agg = recenti.groupby(COL_ITEM_CODE)[COL_QTA_RICHIESTA].sum().sort_values(ascending=False)
-            st.subheader("📈 Top articoli richiesti negli ultimi 30 giorni")
-            st.dataframe(agg.reset_index())
-        except Exception as e:
-            st.error(f"Errore durante il raggruppamento: {e}")
+        except Exception:
+            agg = pd.Series(dtype=float)
 
-        ordine_sel = st.selectbox("📦 Seleziona ordine da analizzare", richiesta[COL_ORDER].dropna().unique())
+        st.subheader("📈 Item più richiesti (ultimi 30 giorni)")
+        if not agg.empty:
+            st.write(agg.head(10))
+            fig, ax = plt.subplots()
+            agg.head(10).plot.pie(ax=ax, autopct='%1.1f%%', startangle=90)
+            ax.set_ylabel('')
+            st.pyplot(fig)
+        else:
+            st.info("Nessun dato richieste recenti.")
 
-        if st.button("Verifica ordine"):
-            filtro = richiesta[richiesta[COL_ORDER] == ordine_sel].copy()
-            filtro[COL_QTA_RICHIESTA] = filtro[COL_QTA_RICHIESTA].apply(try_int)
+        with st.expander("⚠️ Alert stock basso"):
+            alert_rows = []
+            for item, tot_req in agg.items():
+                key = norma_item(item)
+                locs_mano, main_mano_qty = get_locations_and_total(stock_in_mano, key)
+                loc_mano_display = locs_mano[0][0] if locs_mano else "non definita"
+                q_mano = main_mano_qty
+                if q_mano < soglia:
+                    reserve_locs = []
+                    val = stock_in_riserva.get(key, [])
+                    for rec in val:
+                        if isinstance(rec, dict):
+                            loc = str(rec.get("location","")).strip()
+                            q = try_int(rec.get("quantità", 0))
+                            if "inventory" in loc.lower():
+                                reserve_locs.append((loc, q))
+                    if reserve_locs:
+                        suggestions = [f"{q} da {loc}" for (loc, q) in reserve_locs]
+                        st.warning(f"'{key}' sotto soglia! In mano: {q_mano} ({loc_mano_display}). Suggerito da riserva: {', '.join(suggestions)}")
+                        reserve_str = "; ".join([f"{loc} ({q})" for loc, q in reserve_locs])
+                    else:
+                        st.warning(f"'{key}' sotto soglia! In mano: {q_mano} ({loc_mano_display}). Nessuna location INVENTORY trovata.")
+                        reserve_str = ""
+                    alert_rows.append({
+                        "Item Code": key,
+                        "Quantità in mano": q_mano,
+                        "Location in mano": loc_mano_display,
+                        "Location riserva INVENTORY": reserve_str
+                    })
+            if alert_rows:
+                df_alert = pd.DataFrame(alert_rows).sort_values("Item Code").reset_index(drop=True)
+                buf = BytesIO()
+                df_alert.to_excel(buf, index=False)
+                st.download_button(
+                    label="📥 Scarica report alert (Excel)",
+                    data=buf.getvalue(),
+                    file_name="alert_stock_basso.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.success("Nessun alert: tutti gli stock in mano sono sopra la soglia.")
 
-            grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
+        st.markdown("## 🔍 Verifica disponibilità per Order Number")
+        order_list = richiesta[COL_ORDER].dropna().unique().tolist()
+        if not order_list:
+            st.info("Nessun Order Number nello storico richieste.")
+        else:
+            ordine_sel = st.selectbox("Seleziona Order Number", order_list)
+            if st.button("Verifica ordine"):
+                filtro = richiesta[richiesta[COL_ORDER] == ordine_sel]
+                grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
 
-            st.subheader(f"🧾 Quantità richieste per ordine **{ordine_sel}**")
-            st.dataframe(grouped)
-
-            rows = []
-            for _, r in grouped.iterrows():
-                rows.append({
-                    "Item Code": r[COL_ITEM_CODE],
-                    "Requested Qty": r[COL_QTA_RICHIESTA]
-                })
-
-            st.write("📌 Totale articoli richiesti:", len(rows))
-
-    
                 rows = []
                 pending_allocations = []
                 for _, r in grouped.iterrows():
@@ -646,12 +674,3 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
-
-
-
-
-
-
-
-
-
