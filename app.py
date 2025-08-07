@@ -391,7 +391,6 @@ if st.button("Verifica ordine"):
 
     st.subheader(f"📦 Quantità richieste per ordine {ordine_sel}")
     st.dataframe(grouped)
-
                 rows = []
                 pending_allocations = []
                 for _, r in grouped.iterrows():
@@ -683,6 +682,7 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
+
 
 
 
