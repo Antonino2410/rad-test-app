@@ -379,7 +379,7 @@ elif page == "Analisi Richieste & Suggerimenti":
         if not order_list:
             st.info("Nessun Order Number nello storico richieste.")
        else:
-    ordine_sel = st.selectbox("Seleziona Order Number", order_list)
+           ordine_sel = st.selectbox("Seleziona Order Number", order_list)
 
     # --- Check duplicati nello storico ---
     if ordine_sel:
@@ -703,6 +703,7 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
+
 
 
 
