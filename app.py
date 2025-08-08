@@ -378,24 +378,39 @@ elif page == "Analisi Richieste & Suggerimenti":
         order_list = richiesta[COL_ORDER].dropna().unique().tolist()
         if not order_list:
             st.info("Nessun Order Number nello storico richieste.")
-        else:
-            ordine_sel = st.selectbox("Seleziona Order Number", order_list)
+       else:
+    ordine_sel = st.selectbox("Seleziona Order Number", order_list)
 
-# --- Check duplicati nello storico ---
-if ordine_sel:
-    filtro_check = richiesta[richiesta[COL_ORDER] == ordine_sel]
-    dup_counts = filtro_check.groupby(COL_ITEM_CODE).size()
-    dup_items = dup_counts[dup_counts > 1]
+    # --- Check duplicati nello storico ---
+    if ordine_sel:
+        filtro_check = richiesta[richiesta[COL_ORDER] == ordine_sel]
+        dup_counts = filtro_check.groupby(COL_ITEM_CODE).size()
+        dup_items = dup_counts[dup_counts > 1]
 
-    if not dup_items.empty:
-        st.warning(f"⚠️ Attenzione: nell'ordine '{ordine_sel}' ci sono articoli caricati più volte nello storico.")
-        st.write("Dettaglio duplicati:")
-        st.dataframe(filtro_check[filtro_check[COL_ITEM_CODE].isin(dup_items.index)])
+        if not dup_items.empty:
+            st.warning(f"⚠️ Attenzione: nell'ordine '{ordine_sel}' ci sono articoli caricati più volte nello storico.")
+            st.write("Dettaglio duplicati:")
+            st.dataframe(filtro_check[filtro_check[COL_ITEM_CODE].isin(dup_items.index)])
 
-if st.button("Verifica ordine"):
-    filtro = richiesta[richiesta[COL_ORDER] == ordine_sel].copy()
-    filtro[COL_QTA_RICHIESTA] = filtro[COL_QTA_RICHIESTA].apply(try_int)
-    grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
+    if st.button("Verifica ordine"):
+        filtro = richiesta[richiesta[COL_ORDER] == ordine_sel].copy()
+        filtro[COL_QTA_RICHIESTA] = filtro[COL_QTA_RICHIESTA].apply(try_int)
+        grouped = filtro.groupby(COL_ITEM_CODE, as_index=False)[COL_QTA_RICHIESTA].sum()
+
+        rows = []
+        for _, row in grouped.iterrows():
+            codice = row[COL_ITEM_CODE]
+            qty_req = row[COL_QTA_RICHIESTA]
+            qty_stock = magazzino[magazzino[COL_ITEM_CODE] == codice][COL_QTA_DISP].sum()
+            rows.append({
+                COL_ITEM_CODE: codice,
+                COL_QTA_RICHIESTA: qty_req,
+                COL_QTA_DISP: qty_stock,
+                "Disponibile": qty_stock >= qty_req
+            })
+
+        df_result = pd.DataFrame(rows)
+        st.dataframe(df_result)
 
                 rows = []
                 pending_allocations = []
@@ -688,5 +703,6 @@ if all_locations:
                     st.sidebar.write(f"- {item_code} → {qty}")
 else:
     st.sidebar.info("Nessuna location registrata nei dati caricati.")
+
 
 
